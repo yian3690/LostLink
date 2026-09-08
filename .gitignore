@@ -1,0 +1,40 @@
+# Python virtual environment
+.venv/
+
+# Python cache and tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Local secrets and runtime data
+.env
+.env.*
+!.env.example
+!admin-web/.env.local.example
+uploads/
+.runtime/
+lostlink.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+*.log
+
+# Next.js
+admin-web/node_modules/
+admin-web/.next/
+admin-web/.env.local
+
+# Local model cache (if redirected into the project)
+.cache/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini

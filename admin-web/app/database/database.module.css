@@ -1,0 +1,62 @@
+.page { width: min(1400px, calc(100% - 36px)); margin: 0 auto; padding: 42px 0 70px; color: #14231c; }
+.header { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 24px; }
+.header p, .createPanel > div p, .toolbar p { margin: 0; color: #078e4d; font-size: 11px; font-weight: 900; letter-spacing: .14em; }
+.header h1 { margin: 5px 0 7px; font-size: clamp(38px, 5vw, 62px); }
+.header span { color: #65736b; }
+.header button { flex: 0 0 auto; background: #14231c; }
+.notice, .error { display: flex; width: 100%; justify-content: space-between; margin: 0 0 18px; border-radius: 13px; padding: 14px 17px; text-align: left; }
+.notice { color: #0a6539; background: #e1f8ea; }
+.error { color: #963e31; background: #ffebe8; }
+.createPanel, .dataPanel { border: 1px solid #dfe8e3; border-radius: 22px; background: rgba(255,255,255,.94); box-shadow: 0 16px 50px rgba(16,38,29,.06); }
+.createPanel { display: grid; grid-template-columns: 180px 1fr; gap: 28px; margin-bottom: 20px; padding: 25px; }
+.createPanel h2, .toolbar h2 { margin: 5px 0 0; font-size: 25px; }
+.createPanel form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.createPanel label { display: grid; gap: 7px; color: #54635b; font-size: 12px; font-weight: 800; }
+.createPanel input, .createPanel select, .createPanel textarea, .filters input, .filters select, .description textarea { width: 100%; border: 1px solid #d9e4dd; border-radius: 11px; padding: 11px 12px; outline: none; color: #14231c; background: white; font: inherit; }
+.createPanel textarea { min-height: 82px; resize: vertical; }
+.createPanel input:focus, .createPanel select:focus, .createPanel textarea:focus, .filters input:focus, .description textarea:focus { border-color: #08a75a; box-shadow: 0 0 0 3px rgba(8,167,90,.1); }
+.wide { grid-column: span 2; }
+.createButton { align-self: end; min-height: 42px; border-radius: 11px; background: #08a75a; }
+.dataPanel { overflow: hidden; }
+.toolbar { display: flex; align-items: end; justify-content: space-between; gap: 20px; padding: 23px 25px; border-bottom: 1px solid #e6ede9; }
+.toolbar h2 span { color: #77857d; font-size: 13px; font-weight: 600; }
+.filters { display: flex; gap: 9px; }
+.filters input { width: min(280px, 40vw); }
+.tableWrap { overflow-x: auto; }
+.dataPanel table { min-width: 1030px; }
+.dataPanel th { white-space: nowrap; }
+.dataPanel td { vertical-align: top; }
+.dataPanel td > strong, .dataPanel td > span { display: block; }
+.dataPanel td > span { margin-top: 5px; color: #718078; font-size: 12px; }
+.found, .lost { display: inline-block; margin-right: 8px; padding: 5px 8px; border-radius: 7px; font-size: 11px; }
+.found { color: #08723f; background: #e4f8ec; }
+.lost { color: #a33b2f; background: #ffebe8; }
+.description { width: 38%; min-width: 300px; font-weight: 650; line-height: 1.55; }
+.description textarea { min-height: 82px; resize: vertical; }
+.rowActions { display: flex; flex-wrap: wrap; gap: 7px; min-width: 150px; }
+.rowActions button { padding: 8px 10px; border-radius: 9px; font-size: 11px; white-space: nowrap; }
+.edit, .cancel { color: #26372f; border: 1px solid #d8e3dc; background: white; }
+.save { background: #08a75a; }
+.delete { color: #a33b2f; background: #ffebe8; }
+.empty { padding: 60px 20px !important; color: #718078; text-align: center; }
+.center { display: grid; min-height: 100dvh; place-items: center; padding: 24px; }
+.blocked { max-width: 560px; padding: 42px; border: 1px solid #e0e8e3; border-radius: 22px; background: white; text-align: center; }
+.blocked b { color: #b55243; font-size: 11px; letter-spacing: .14em; }
+.blocked h1 { margin: 12px 0; font-size: 38px; }
+.blocked p { color: #66756d; line-height: 1.6; }
+
+@media (max-width: 900px) {
+  .createPanel { grid-template-columns: 1fr; }
+  .createPanel form { grid-template-columns: 1fr 1fr; }
+  .wide { grid-column: span 2; }
+}
+
+@media (max-width: 640px) {
+  .page { width: min(100% - 20px, 1400px); padding-top: 24px; }
+  .header, .toolbar { align-items: stretch; flex-direction: column; }
+  .header button { align-self: flex-start; }
+  .createPanel form { grid-template-columns: 1fr; }
+  .wide { grid-column: auto; }
+  .filters { flex-direction: column; }
+  .filters input { width: 100%; }
+}
