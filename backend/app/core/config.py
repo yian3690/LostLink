@@ -24,9 +24,11 @@ class Settings(BaseSettings):
 
     line_channel_secret: str = ""
     line_channel_access_token: str = ""
+    line_liff_id: str = ""
 
-    gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"
+    ollama_base_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = "gemma3:4b"
+    ollama_timeout_seconds: float = 90
     e5_model: str = "intfloat/multilingual-e5-base"
     siglip_model: str = "google/siglip2-base-patch16-256"
 

@@ -17,6 +17,7 @@
 .sectionTitle button { padding: 7px 0; color: #65736b; background: transparent; font-size: 12px; }
 .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .card { overflow: hidden; border: 1px solid #e2eae5; border-radius: 18px; background: white; box-shadow: 0 8px 28px rgba(16,38,29,.05); }
+.claimedCard { opacity: .82; }
 .photoButton { display: block; width: 100%; padding: 0; border: 0; border-radius: 0; background: transparent; cursor: zoom-in; }
 .photoButton:hover { transform: none; }
 .photo { position: relative; display: grid; height: 142px; place-items: center; overflow: hidden; color: #87938c; background: #eaf0ec; font-size: 12px; }
@@ -24,6 +25,7 @@
 .photoButton:focus-visible .photo { outline: 3px solid #08a75a; outline-offset: -3px; }
 .zoomHint { position: absolute; right: 10px; bottom: 10px; padding: 6px 9px; border-radius: 999px; color: white; background: rgba(8, 36, 25, .78); font-size: 10px; font-weight: 800; backdrop-filter: blur(8px); }
 .photo em { position: absolute; top: 10px; right: 10px; padding: 5px 8px; border-radius: 999px; color: #765d0a; background: #fff3ae; font-size: 10px; font-style: normal; font-weight: 800; }
+.photo em.claimedBadge { color: white; background: #17605f; }
 .cardBody { padding: 13px; }
 .cardBody h3 { margin: 0 0 8px; font-size: 15px; }
 .cardBody p { margin-top: 4px; overflow: hidden; color: #68766e; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
@@ -49,6 +51,10 @@
 .error { color: #963e31; background: #ffebe8; }
 .notice b, .error b { margin-left: 10px; }
 .results { margin-top: 36px; }
+.noResults { margin-top: 24px; padding: 28px 22px; border: 1px dashed #b9cec1; border-radius: 18px; background: white; text-align: center; }
+.noResults span { display: grid; width: 46px; height: 46px; margin: 0 auto 12px; place-items: center; border-radius: 50%; color: #078e4d; background: #e5f7ec; font-size: 24px; }
+.noResults h2 { margin: 0 0 7px; font-size: 21px; }
+.noResults p { margin: 0; color: #68766e; font-size: 13px; line-height: 1.65; }
 .match { display: grid; grid-template-columns: 112px 1fr; gap: 15px; margin-top: 14px; padding: 13px; border: 1px solid #dce6df; border-radius: 17px; background: white; }
 .matchPhotoButton { width: 112px; height: 130px; padding: 0; overflow: hidden; border-radius: 12px; background: #eaf0ec; cursor: zoom-in; }
 .matchPhotoButton img { width: 100%; height: 100%; object-fit: cover; }

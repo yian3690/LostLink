@@ -28,6 +28,10 @@ class ReportDescriptionUpdate(BaseModel):
     description: str = Field(min_length=1, max_length=2000)
 
 
+class ReportStatusUpdate(BaseModel):
+    status: Literal["open", "returned"]
+
+
 class ReportRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

@@ -17,6 +17,7 @@ type Report = {
   description: string;
   category: string | null;
   color: string | null;
+  distinctive_features: string[];
   location: string | null;
   created_at: string;
 };
@@ -138,7 +139,10 @@ export default function Dashboard() {
                     <code>{report.id.slice(0, 8)}</code>
                   </td>
                   <td className="description">{report.description}</td>
-                  <td>{[report.color, report.category].filter(Boolean).join(" · ") || "待辨識"}</td>
+                  <td>
+                    {[report.color, report.category].filter(Boolean).join(" · ") || "待辨識"}
+                    {report.distinctive_features.length > 0 && <small>{report.distinctive_features.join("、")}</small>}
+                  </td>
                   <td>{report.location || "未提供"}</td>
                   <td><span className="open">{report.status}</span></td>
                 </tr>

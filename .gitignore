@@ -31,6 +31,10 @@ admin-web/.env.local
 
 # Local model cache (if redirected into the project)
 .cache/
+.ollama/
+models/
+*.gguf
+*.safetensors
 
 # Editors and operating systems
 .vscode/

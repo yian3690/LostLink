@@ -8,6 +8,7 @@ from app.schemas.reports import (
     ReportCreate,
     ReportCreated,
     ReportDescriptionUpdate,
+    ReportStatusUpdate,
     ReportRead,
     MatchRead,
 )
@@ -77,6 +78,22 @@ async def admin_update_report(
         report=to_report_read(report),
         matches=[MatchRead.model_validate(item) for item in matches],
     )
+
+
+@router.patch(
+    "/reports/{report_id}/status",
+    response_model=ReportRead,
+    dependencies=[Depends(require_database_admin)],
+)
+async def admin_update_report_status(
+    report_id: str,
+    payload: ReportStatusUpdate,
+    service: ReportService = Depends(service_dependency),
+) -> ReportRead:
+    report = await service.update_status(report_id, payload.status)
+    if not report:
+        raise HTTPException(404, "Report not found")
+    return to_report_read(report)
 
 
 @router.delete(

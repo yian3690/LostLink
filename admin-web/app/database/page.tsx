@@ -10,12 +10,15 @@ type Report = {
   description: string;
   category: string | null;
   color: string | null;
+  distinctive_features: string[];
   location: string | null;
   occurred_at: string | null;
   created_at: string;
+  image_url: string | null;
 };
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "";
+const PAGE_SIZE = 8;
 
 function formatDate(value: string | null): string {
   if (!value) return "未提供";
@@ -33,12 +36,16 @@ export default function DatabasePage() {
   const [notice, setNotice] = useState("");
   const [query, setQuery] = useState("");
   const [kindFilter, setKindFilter] = useState<"all" | "lost" | "found">("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | "open" | "returned">("all");
+  const [page, setPage] = useState(1);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingDescription, setEditingDescription] = useState("");
   const [kind, setKind] = useState<"lost" | "found">("found");
   const [description, setDescription] = useState("");
   const [location, setLocation] = useState("");
   const [occurredAt, setOccurredAt] = useState("");
+  const [imageBase64, setImageBase64] = useState("");
+  const [imageName, setImageName] = useState("");
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -65,16 +72,39 @@ export default function DatabasePage() {
     const needle = query.trim().toLocaleLowerCase();
     return reports.filter((report) => {
       if (kindFilter !== "all" && report.kind !== kindFilter) return false;
+      if (statusFilter !== "all" && report.status !== statusFilter) return false;
       if (!needle) return true;
       return [report.id, report.description, report.location, report.category, report.color]
         .filter(Boolean)
         .some((value) => String(value).toLocaleLowerCase().includes(needle));
     });
-  }, [kindFilter, query, reports]);
+  }, [kindFilter, query, reports, statusFilter]);
+  const pageCount = Math.max(1, Math.ceil(visibleReports.length / PAGE_SIZE));
+  const safePage = Math.min(page, pageCount);
+  const pagedReports = visibleReports.slice(
+    (safePage - 1) * PAGE_SIZE,
+    safePage * PAGE_SIZE,
+  );
+
+  useEffect(() => setPage(1), [kindFilter, query, statusFilter]);
+
+  const selectImage = (file: File | undefined) => {
+    if (!file) { setImageBase64(""); setImageName(""); return; }
+    if (!file.type.startsWith("image/")) { setError("請選擇照片檔案"); return; }
+    if (file.size > 15 * 1024 * 1024) { setError("照片不可超過 15MB"); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      setImageBase64(String(reader.result).split(",", 2)[1] ?? "");
+      setImageName(file.name);
+      setError("");
+    };
+    reader.onerror = () => setError("無法讀取照片");
+    reader.readAsDataURL(file);
+  };
 
   const createReport = async (event: FormEvent) => {
     event.preventDefault();
-    if (!description.trim()) { setError("請輸入物品描述"); return; }
+    if (!description.trim() && !imageBase64) { setError("請輸入描述或選擇照片"); return; }
     setLoading(true);
     setError("");
     const response = await fetch("/api/database/reports", {
@@ -83,14 +113,34 @@ export default function DatabasePage() {
       body: JSON.stringify({
         kind, description: description.trim(), location: location.trim() || null,
         occurred_at: occurredAt ? new Date(occurredAt).toISOString() : null,
+        image_base64: imageBase64 || null,
       }),
     });
     if (response.ok) {
-      setDescription(""); setLocation(""); setOccurredAt("");
+      setDescription(""); setLocation(""); setOccurredAt(""); setImageBase64(""); setImageName("");
       setNotice("資料已新增，AI 向量與配對也已建立。");
       await refresh();
     } else {
       setError(response.status === 403 ? "資料庫管理僅限本機使用" : "新增失敗");
+      setLoading(false);
+    }
+  };
+
+  const updateStatus = async (report: Report) => {
+    const nextStatus = report.status === "returned" ? "open" : "returned";
+    const label = nextStatus === "returned" ? "已認領" : "待認領";
+    if (!window.confirm(`確定將「${report.description}」標註為${label}？`)) return;
+    setLoading(true);
+    const response = await fetch("/api/database/reports/manage", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: report.id, status: nextStatus }),
+    });
+    if (response.ok) {
+      setNotice(`物品已標註為${label}。`);
+      await refresh();
+    } else {
+      setError("狀態更新失敗");
       setLoading(false);
     }
   };
@@ -173,38 +223,63 @@ export default function DatabasePage() {
           </label>
           <label>地點<input value={location} onChange={(event) => setLocation(event.target.value)} placeholder="例如：圖書館 2F" /></label>
           <label>時間<input type="datetime-local" value={occurredAt} onChange={(event) => setOccurredAt(event.target.value)} /></label>
+          <label>物品照片
+            <span className={styles.filePicker}>
+              <input
+                className={styles.fileInput}
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                onChange={(event) => selectImage(event.target.files?.[0])}
+              />
+              <span className={styles.fileButton}>＋ 選擇照片</span>
+              <span className={imageName ? styles.fileName : styles.filePlaceholder}>
+                {imageName || "JPG、PNG 或 WebP"}
+              </span>
+            </span>
+          </label>
           <button className={styles.createButton} disabled={loading}>{loading ? "處理中…" : "新增並建立 AI 向量"}</button>
         </form>
       </section>
 
       <section className={styles.dataPanel}>
         <div className={styles.toolbar}>
-          <div><p>ITEM REPORTS</p><h2>資料列表 <span>{visibleReports.length} / {reports.length}</span></h2></div>
+          <div><p>ITEM REPORTS</p><h2>資料列表 <span>{visibleReports.length} / {reports.length}，每頁 {PAGE_SIZE} 筆</span></h2></div>
           <div className={styles.filters}>
             <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜尋描述、地點或 ID" />
             <select value={kindFilter} onChange={(event) => setKindFilter(event.target.value as typeof kindFilter)}>
               <option value="all">全部類型</option><option value="found">只看拾獲</option><option value="lost">只看遺失</option>
             </select>
+            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}>
+              <option value="all">全部狀態</option><option value="open">待認領</option><option value="returned">已認領</option>
+            </select>
           </div>
         </div>
         <div className={styles.tableWrap}>
           <table>
-            <thead><tr><th>類型／ID</th><th>描述</th><th>AI 特徵</th><th>地點／時間</th><th>操作</th></tr></thead>
+            <thead><tr><th>照片</th><th>類型／ID</th><th>描述</th><th>AI 特徵</th><th>地點／時間</th><th>操作</th></tr></thead>
             <tbody>
-              {!loading && visibleReports.length === 0 && <tr><td colSpan={5} className={styles.empty}>沒有符合條件的資料。</td></tr>}
-              {visibleReports.map((report) => (
+              {!loading && visibleReports.length === 0 && <tr><td colSpan={6} className={styles.empty}>沒有符合條件的資料。</td></tr>}
+              {pagedReports.map((report) => (
                 <tr key={report.id}>
-                  <td><b className={report.kind === "found" ? styles.found : styles.lost}>{report.kind === "found" ? "拾獲" : "遺失"}</b><code title={report.id}>{report.id.slice(0, 8)}</code></td>
+                  <td>{report.image_url ? <a href={`${API}${report.image_url}`} target="_blank" rel="noreferrer"><img className={styles.thumbnail} src={`${API}${report.image_url}`} alt="物品照片" /></a> : <span className={styles.noPhoto}>無照片</span>}</td>
+                  <td>
+                    <b className={report.kind === "found" ? styles.found : styles.lost}>{report.kind === "found" ? "拾獲" : "遺失"}</b>
+                    <b className={report.status === "returned" ? styles.returned : styles.open}>{report.status === "returned" ? "已認領" : report.status === "claim_pending" ? "認領審核中" : "待認領"}</b>
+                    <code title={report.id}>{report.id.slice(0, 8)}</code>
+                  </td>
                   <td className={styles.description}>
                     {editingId === report.id ? <textarea value={editingDescription} onChange={(event) => setEditingDescription(event.target.value)} autoFocus /> : report.description}
                   </td>
-                  <td>{[report.color, report.category].filter(Boolean).join(" · ") || "待辨識"}</td>
+                  <td className={styles.aiFeatures}>
+                    <strong>{[report.color, report.category].filter(Boolean).join(" · ") || "待辨識"}</strong>
+                    {report.distinctive_features.length > 0 && <span>{report.distinctive_features.join("、")}</span>}
+                  </td>
                   <td><strong>{report.location || "未提供"}</strong><span>{formatDate(report.occurred_at || report.created_at)}</span></td>
                   <td><div className={styles.rowActions}>
                     {editingId === report.id ? (
                       <><button className={styles.save} onClick={() => void saveDescription(report.id)} disabled={loading}>儲存</button><button className={styles.cancel} onClick={() => setEditingId(null)}>取消</button></>
                     ) : (
-                      <><button className={styles.edit} onClick={() => startEdit(report)}>修改描述</button><button className={styles.delete} onClick={() => void deleteReport(report)}>刪除</button></>
+                      <><button className={styles.edit} onClick={() => startEdit(report)}>修改描述</button>{report.kind === "found" && <button className={report.status === "returned" ? styles.reopen : styles.claimed} onClick={() => void updateStatus(report)}>{report.status === "returned" ? "恢復待認領" : "標記已領取"}</button>}<button className={styles.delete} onClick={() => void deleteReport(report)}>刪除</button></>
                     )}
                   </div></td>
                 </tr>
@@ -212,6 +287,13 @@ export default function DatabasePage() {
             </tbody>
           </table>
         </div>
+        {visibleReports.length > PAGE_SIZE && (
+          <nav className={styles.pagination} aria-label="資料分頁">
+            <button disabled={safePage === 1 || loading} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一頁</button>
+            <span>第 {safePage} / {pageCount} 頁</span>
+            <button disabled={safePage === pageCount || loading} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>下一頁</button>
+          </nav>
+        )}
       </section>
     </main>
   );

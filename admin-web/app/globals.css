@@ -46,6 +46,7 @@ button.secondary { color: var(--ink); background: white; border: 1px solid var(-
 .tableWrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }
 th, td { padding: 17px 24px; border-bottom: 1px solid #edf2ef; text-align: left; font-size: 14px; vertical-align: middle; }
+td small { display: block; margin-top: 5px; color: var(--muted); line-height: 1.45; }
 th { color: var(--muted); background: #fbfcfb; font-size: 12px; letter-spacing: .05em; }
 tr:last-child td { border-bottom: 0; }
 .kind { display: inline-block; min-width: 43px; margin-right: 9px; padding: 5px 8px; border-radius: 7px; text-align: center; font-size: 12px; font-weight: 800; }

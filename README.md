@@ -24,7 +24,7 @@ flowchart LR
     API --> VERIFY[LINE 簽章驗證]
     VERIFY --> APP[LostLink 應用服務]
 
-    APP --> GEMINI[Gemini 多模態理解<br/>欄位抽取、圖片描述]
+    APP --> GEMMA[Ollama / Gemma 3<br/>自然對話、欄位抽取、圖片描述]
     APP --> E5[multilingual-e5-base<br/>中文文字 Embedding]
     APP --> SIGLIP[SigLIP 2 Base 256<br/>文字／圖片 Embedding]
     APP --> OBJECT[物件儲存<br/>照片原檔與縮圖]
@@ -50,7 +50,7 @@ flowchart LR
 | 使用者入口 | LINE Messaging API | 接收文字、照片與按鈕事件，回覆登記結果及可能配對 |
 | 手機介面 | Next.js、LINE LIFF、PWA | 拍照登記、地點與時間、拾獲物瀏覽、圖文協尋與認領 |
 | 後端 API | Python 3.12、FastAPI | Webhook、流程控制、權限、資料 API 與通知工作 |
-| 多模態理解 | Gemini | 抽取類別、品牌、顏色、地點、時間與圖片描述 |
+| 對話與多模態理解 | Ollama / Gemma 3 4B | 本機自然對話，並從文字與照片抽取類別、品牌、顏色及特色 |
 | 文字檢索 | multilingual-e5-base | 比較中文報失與拾獲描述的語意相似度 |
 | 跨模態檢索 | google/siglip2-base-patch16-256 | 比較文字與圖片、圖片與圖片的相似度 |
 | 主資料庫 | PostgreSQL | 使用者、案件、狀態、通知、認領與稽核紀錄 |
@@ -67,7 +67,7 @@ sequenceDiagram
     actor Student as 遺失者
     participant Line as LINE
     participant API as FastAPI
-    participant AI as Gemini / E5 / SigLIP 2
+    participant AI as Gemma 3 / E5 / SigLIP 2
     participant DB as PostgreSQL + pgvector
     participant Match as 配對引擎
 
@@ -85,7 +85,7 @@ sequenceDiagram
 ```
 
 1. 驗證 LINE Webhook 簽章並識別訊息類型。
-2. Gemini 將描述整理成 `category`、`brand`、`color`、`location`、`occurred_at` 等欄位。
+2. 本機 Gemma 3 將文字與照片整理成結構化物品屬性；地點與時間則由案件流程驗證及保存。
 3. E5 產生文字向量；若有物品舊照，SigLIP 2 同時產生圖片向量。
 4. 系統先按校區、案件狀態、類別及時間範圍篩選，再執行向量搜尋。
 5. 若沒有可靠候選，案件保持開放；新增拾獲物時會自動重新比對。
@@ -97,7 +97,7 @@ sequenceDiagram
     actor Finder as 拾獲者
     participant Line as LINE
     participant API as FastAPI
-    participant AI as Gemini / E5 / SigLIP 2
+    participant AI as Gemma 3 / E5 / SigLIP 2
     participant DB as PostgreSQL + pgvector
     participant Notify as 通知服務
 
@@ -113,7 +113,7 @@ sequenceDiagram
     Line-->>Finder: 已完成拾獲登記
 ```
 
-照片不只交給 Gemini 產生描述，也會直接交給 SigLIP 2 產生圖像向量，避免文字描述遺漏保護殼、外型或局部特徵。
+照片會由 Gemma 3 產生可讀的物品屬性與特色描述，也會直接交給 SigLIP 2 產生圖像向量，避免文字描述遺漏保護殼、外型或局部特徵。
 
 ### 3. 多訊號配對
 
@@ -168,7 +168,7 @@ flowchart TD
 
 ## 隱私與安全原則
 
-- LINE Channel Secret、Access Token、Gemini API Key 只放在環境變數。
+- LINE Channel Secret 與 Access Token 只放在環境變數；Gemma 3 透過本機 Ollama 執行，不需要雲端 AI 金鑰。
 - 通知採最少揭露原則，不公開雙方身分與完整物品細節。
 - 圖片使用不可猜測的路徑或短效簽章網址。
 - Webhook 驗證 LINE 簽章；管理後台使用角色權限與操作紀錄。
@@ -230,7 +230,7 @@ LostLink AI/
 
 ### 1. Demo 模式
 
-Demo 模式不需要 LINE、Gemini 或 PostgreSQL 金鑰，會使用 SQLite 與本機 deterministic embedding 跑通產品流程。
+Demo 模式不需要 LINE 或 PostgreSQL 金鑰，會使用 SQLite 與本機 deterministic embedding 跑通產品流程。
 
 ```powershell
 cd "<LostLink 專案資料夾>"
@@ -274,11 +274,12 @@ docker compose up --build
 
 ### 3. 正式 AI 與 LINE 模式
 
-複製設定範本，填入自己的金鑰：
+先安裝 Ollama 並下載 Gemma 3 4B，再複製設定範本：
 
 ```powershell
 Copy-Item .env.example .env
 pip install -r requirements-ml.txt
+ollama pull gemma3:4b
 ```
 
 至少設定：
@@ -288,11 +289,12 @@ DEMO_MODE=false
 DATABASE_URL=postgresql+asyncpg://lostlink:password@localhost:5432/lostlink
 LINE_CHANNEL_SECRET=...
 LINE_CHANNEL_ACCESS_TOKEN=...
-GEMINI_API_KEY=...
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=gemma3:4b
 ADMIN_API_KEY=...
 ```
 
-正式模式第一次使用 E5／SigLIP 2 時會從 Hugging Face 下載模型權重。LINE Developers 的 Webhook URL 設為：
+正式模式第一次使用 E5／SigLIP 2 時會從 Hugging Face 下載模型權重。Gemma 3 權重由 Ollama 保存在專案資料夾之外，不會被提交到 GitHub。LINE Developers 的 Webhook URL 設為：
 
 目前本機展示環境已切換為 `DEMO_MODE=false`，使用 `intfloat/multilingual-e5-base` 與 `google/siglip2-base-patch16-256` 的 768 維正式向量。模型會在後端啟動時預熱並於程序內共用；CPU 模式首次啟動約需數十秒，之後不需任何付費 API。
 
@@ -346,10 +348,10 @@ npm audit --audit-level=high
 - [x] 確認 MVP 技術架構與使用流程
 - [x] 建立 FastAPI 與 LINE Webhook
 - [x] 建立 PostgreSQL／pgvector schema 與 HNSW index
-- [x] 串接 Gemini、E5 與 SigLIP 2（需使用者金鑰／首次下載模型）
+- [x] 串接本機 Gemma 3、E5 與 SigLIP 2（不需付費 AI API；首次需下載模型）
 - [x] 實作候選配對、LINE 通知與安全認領
 - [x] 建立管理後台、Demo 資料與自動測試
 - [x] 建立手機版 LIFF／PWA、相機上傳、拾獲物瀏覽與圖文協尋
 - [x] 圖片重新編碼去除 metadata，公開介面只提供縮圖
 - [ ] 建立評估集並校準配對信心分數
-- [ ] 使用正式 LINE／Gemini 帳號完成線上環境驗收
+- [ ] 使用正式 LINE 帳號與本機 Gemma 3 完成完整展示驗收

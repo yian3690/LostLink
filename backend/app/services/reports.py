@@ -1,9 +1,10 @@
 import base64
 import binascii
 import io
+import re
 from pathlib import Path
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +25,7 @@ from app.schemas.reports import DashboardStats, ReportCreate
 from app.services.ai import MultimodalAnalyzer, get_embedding_service
 from app.services.matching import score_reports
 from app.services.line import LineClient
+from app.services.line import extract_location
 
 
 class ReportService:
@@ -35,10 +37,29 @@ class ReportService:
 
     async def create(self, payload: ReportCreate) -> tuple[ItemReport, list[MatchCandidate]]:
         image_bytes = self._decode_image(payload.image_base64)
+        if image_bytes:
+            self._validate_image(image_bytes)
         attributes = await self.analyzer.analyze(payload.description, image_bytes)
         description = attributes.normalized_description or payload.description
+        location = payload.location or extract_location(description)
 
         user = await self._get_or_create_user(payload.line_user_id)
+        if user and payload.line_user_id != "web-guest" and not image_bytes:
+            duplicate = await self._find_recent_duplicate(
+                user.id,
+                payload.kind,
+                description,
+                attributes.category,
+                attributes.color,
+                location,
+            )
+            if duplicate:
+                if not duplicate.location and location:
+                    duplicate.location = location
+                    await self.session.commit()
+                setattr(duplicate, "_was_deduplicated", True)
+                return duplicate, await self.list_matches(duplicate.id)
+
         report = ItemReport(
             user_id=user.id if user else None,
             kind=payload.kind,
@@ -48,7 +69,7 @@ class ReportService:
             color=attributes.color,
             distinctive_features=attributes.distinctive_features,
             campus=payload.campus,
-            location=payload.location,
+            location=location,
             occurred_at=payload.occurred_at,
         )
         self.session.add(report)
@@ -192,6 +213,18 @@ class ReportService:
                 target.unlink(missing_ok=True)
         return True
 
+    async def update_status(self, report_id: str, status: str) -> ItemReport | None:
+        report = await self.session.scalar(
+            select(ItemReport)
+            .options(selectinload(ItemReport.images))
+            .where(ItemReport.id == report_id)
+        )
+        if not report:
+            return None
+        report.status = status
+        await self.session.commit()
+        return report
+
     async def _clear_matches(self, report_id: str) -> None:
         matches = list(
             await self.session.scalars(
@@ -235,7 +268,7 @@ class ReportService:
             .where(
                 ItemReport.id == report_id,
                 ItemReport.kind == "found",
-                ItemReport.status.in_(("open", "claim_pending")),
+                ItemReport.status.in_(("open", "claim_pending", "returned")),
             )
         )
         if not report or not report.images or not report.images[0].thumbnail_path:
@@ -430,6 +463,72 @@ class ReportService:
         await self.session.flush()
         return user
 
+    async def _find_recent_duplicate(
+        self,
+        user_id: str,
+        kind: str,
+        description: str,
+        category: str | None,
+        color: str | None,
+        location: str | None,
+    ) -> ItemReport | None:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        candidates = list(
+            await self.session.scalars(
+                select(ItemReport)
+                .options(
+                    selectinload(ItemReport.images),
+                    selectinload(ItemReport.embedding),
+                )
+                .where(
+                    ItemReport.user_id == user_id,
+                    ItemReport.kind == kind,
+                    ItemReport.status.in_(("open", "claim_pending")),
+                    ItemReport.created_at >= cutoff,
+                )
+                .order_by(ItemReport.created_at.desc())
+                .limit(20)
+            )
+        )
+        key = self._duplicate_key(description)
+        for candidate in candidates:
+            if key and key == self._duplicate_key(candidate.description):
+                return candidate
+            same_category = bool(
+                category and candidate.category and category == candidate.category
+            )
+            compatible_color = not color or not candidate.color or color == candidate.color
+            same_location = bool(
+                location
+                and candidate.location
+                and self._duplicate_key(location)
+                == self._duplicate_key(candidate.location)
+            )
+            if same_category and compatible_color and same_location:
+                return candidate
+        return None
+
+    @staticmethod
+    def _duplicate_key(text: str) -> str:
+        normalized = text.casefold()
+        for phrase in (
+            "請幫我找",
+            "我的",
+            "我有",
+            "我",
+            "不見了",
+            "不見",
+            "找不到",
+            "弄丟了",
+            "弄丟",
+            "遺失了",
+            "遺失",
+            "掉了",
+            "在",
+        ):
+            normalized = normalized.replace(phrase, "")
+        return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", normalized)
+
     @staticmethod
     def _decode_image(encoded: str | None) -> bytes | None:
         if not encoded:
@@ -443,6 +542,20 @@ class ReportService:
         if len(data) > 15 * 1024 * 1024:
             raise ValueError("image must be 15 MB or smaller")
         return data
+
+    @staticmethod
+    def _validate_image(data: bytes) -> None:
+        from PIL import Image, UnidentifiedImageError
+
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                if image.format not in {"JPEG", "PNG", "WEBP"}:
+                    raise ValueError("unsupported image format")
+                image.verify()
+        except (UnidentifiedImageError, OSError, ValueError) as exc:
+            raise ValueError(
+                "image must be a valid JPEG, PNG, or WebP file"
+            ) from exc
 
     @staticmethod
     def _store_image(report_id: str, data: bytes) -> tuple[str, str]:

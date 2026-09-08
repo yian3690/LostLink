@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import re
 from typing import Any, Sequence
 
 import httpx
@@ -135,8 +136,8 @@ def build_match_messages(text: str, image_url: str | None) -> list[dict]:
 
 def parse_report_kind(text: str) -> tuple[str | None, str]:
     normalized = text.strip()
-    lost_prefixes = ("遺失", "報失", "不見了", "我掉了")
-    found_prefixes = ("拾獲", "撿到", "找到")
+    lost_prefixes = ("我有遺失", "我遺失", "遺失", "報失", "不見了", "我掉了")
+    found_prefixes = ("我有撿到", "我撿到", "拾獲", "撿到", "找到")
     for prefix in lost_prefixes:
         if normalized.startswith(prefix):
             return "lost", normalized.removeprefix(prefix).strip(" ：:")
@@ -148,3 +149,28 @@ def parse_report_kind(text: str) -> tuple[str | None, str]:
     if any(keyword in normalized for keyword in ("撿到", "拾獲", "有人掉")):
         return "found", normalized
     return None, normalized
+
+
+def extract_location(text: str) -> str | None:
+    """Extract common campus room/building locations from conversational text."""
+    room = re.search(r"(?i)([A-Z]{1,4}\s*-?\s*\d{2,4})\s*(教室)?", text)
+    if room:
+        code = re.sub(r"[\s-]+", "", room.group(1)).upper()
+        return f"{code}教室" if room.group(2) else code
+
+    building = re.search(
+        r"(圖書館|體育館|活動中心|學生餐廳|餐廳|宿舍|教學大樓|綜合大樓)"
+        r"(?:\s*(?:第)?([0-9一二三四五六七八九十]+)\s*(?:樓|F))?",
+        text,
+        re.IGNORECASE,
+    )
+    if building:
+        floor = f" {building.group(2)}F" if building.group(2) else ""
+        return f"{building.group(1)}{floor}"
+
+    floor = re.search(
+        r"(?:在|於)\s*((?:第)?[0-9一二三四五六七八九十]+\s*(?:樓|F))",
+        text,
+        re.IGNORECASE,
+    )
+    return re.sub(r"\s+", "", floor.group(1)) if floor else None

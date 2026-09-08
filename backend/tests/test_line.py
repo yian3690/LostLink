@@ -8,6 +8,7 @@ from app.services.line import (
     LineClient,
     build_match_messages,
     build_match_reply,
+    extract_location,
     parse_report_kind,
 )
 
@@ -36,7 +37,11 @@ def test_parse_report_kind() -> None:
     assert parse_report_kind("你好") == (None, "你好")
     assert parse_report_kind("我的黑色 AirPods 在圖書館不見了")[0] == "lost"
     assert parse_report_kind("我在二樓撿到一副黑色耳機")[0] == "found"
+    assert parse_report_kind("我有撿到這個") == ("found", "這個")
+    assert parse_report_kind("我有遺失這個") == ("lost", "這個")
     assert parse_report_kind("你能列目前的遺失物嗎")[0] is None
+    assert extract_location("我在ZB302教室有東西不見") == "ZB302教室"
+    assert extract_location("我的耳機在圖書館三樓不見了") == "圖書館 三F"
 
 
 def test_match_reply_reports_found_and_not_found() -> None:

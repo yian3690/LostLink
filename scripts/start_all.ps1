@@ -11,9 +11,33 @@ $ngrok = $null
 $ngrokProcessId = $null
 $ngrokExecutable = $null
 $publicUrl = $null
+$ollamaCommand = Get-Command ollama -ErrorAction SilentlyContinue
 
 if (-not (Test-Path -LiteralPath $pythonPath)) {
     throw "找不到 .venv，請先安裝 Python 3.12 並建立虛擬環境。"
+}
+if (-not $ollamaCommand) {
+    throw "找不到 Ollama。請先安裝 Ollama，再執行：ollama pull gemma3:4b"
+}
+try {
+    $ollamaTags = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 3
+} catch {
+    Write-Host "正在啟動本機 Gemma 3..." -ForegroundColor Cyan
+    Start-Process -FilePath $ollamaCommand.Source -ArgumentList "serve" -WindowStyle Hidden | Out-Null
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        try {
+            $ollamaTags = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 2
+            break
+        } catch { Start-Sleep -Milliseconds 500 }
+    }
+}
+if (-not $ollamaTags) {
+    throw "Ollama 啟動逾時。請開啟 Ollama 後再試一次。"
+}
+$configuredOllamaModel = if ($env:OLLAMA_MODEL) { $env:OLLAMA_MODEL } else { "gemma3:4b" }
+$installedOllamaModels = @($ollamaTags.models | ForEach-Object { $_.name })
+if ($installedOllamaModels -notcontains $configuredOllamaModel) {
+    throw "尚未安裝 $configuredOllamaModel。請在 PowerShell 執行：ollama pull $configuredOllamaModel"
 }
 if (-not (Test-Path -LiteralPath $nextCli)) {
     Write-Host "首次啟動：安裝網頁套件..." -ForegroundColor Cyan
@@ -125,6 +149,7 @@ Write-Host "電腦：http://localhost:3000/mobile"
 Write-Host "手機：http://${lanAddress}:3000/mobile（需連接同一個 Wi-Fi）"
 Write-Host "管理後台：http://localhost:3000"
 Write-Host "API 文件：http://localhost:8000/docs"
+Write-Host "本機 AI：Ollama $configuredOllamaModel"
 if ($publicUrl) {
     Write-Host ""
     Write-Host "公開 HTTPS：${publicUrl}/mobile" -ForegroundColor Cyan

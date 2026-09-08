@@ -13,6 +13,7 @@ type Report = {
   category: string | null;
   brand: string | null;
   color: string | null;
+  distinctive_features: string[];
   campus: string | null;
   location: string | null;
   occurred_at: string | null;
@@ -80,6 +81,7 @@ export default function MobilePage() {
   const [tab, setTab] = useState<Tab>("items");
   const [reports, setReports] = useState<Report[]>([]);
   const [matches, setMatches] = useState<Match[]>([]);
+  const [searchPerformed, setSearchPerformed] = useState(false);
   const [lineUserId, setLineUserId] = useState("web-guest");
   const [displayName, setDisplayName] = useState("同學");
   const [loading, setLoading] = useState(false);
@@ -105,7 +107,7 @@ export default function MobilePage() {
         cache: "no-store",
       });
       if (!response.ok) throw new Error("目前無法讀取拾獲物");
-      setReports((await response.json()).filter((item: Report) => item.status !== "returned"));
+      setReports(await response.json());
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "讀取失敗");
     }
@@ -154,6 +156,14 @@ export default function MobilePage() {
         }))
         .filter((item): item is { match: Match; report: Report } => Boolean(item.report)),
     [matches, reports],
+  );
+  const availableReports = useMemo(
+    () => reports.filter((item) => item.status !== "returned"),
+    [reports],
+  );
+  const claimedReports = useMemo(
+    () => reports.filter((item) => item.status === "returned"),
+    [reports],
   );
 
   const onImage = async (
@@ -227,6 +237,7 @@ export default function MobilePage() {
     setLoading(true);
     setError("");
     setMatches([]);
+    setSearchPerformed(false);
     try {
       const response = await fetch(`${API}/api/v1/reports`, {
         method: "POST",
@@ -243,6 +254,7 @@ export default function MobilePage() {
       if (!response.ok) throw new Error("搜尋失敗，請稍後再試");
       const result: ReportCreated = await response.json();
       setMatches(result.matches);
+      setSearchPerformed(true);
       setNotice(
         result.matches.length
           ? `找到 ${result.matches.length} 個可能相符的物品`
@@ -314,8 +326,8 @@ export default function MobilePage() {
                 <button onClick={() => void loadReports()}>重新整理</button>
               </div>
               <div className={styles.grid}>
-                {reports.length === 0 && <p className={styles.empty}>目前沒有待認領物品。</p>}
-                {reports.map((report) => (
+                {availableReports.length === 0 && <p className={styles.empty}>目前沒有待認領物品。</p>}
+                {availableReports.map((report) => (
                   <article className={styles.card} key={report.id}>
                     {report.image_url ? (
                       <button
@@ -327,17 +339,50 @@ export default function MobilePage() {
                         <div className={styles.photo}>
                         <img src={apiImage(report.image_url) ?? ""} alt="拾獲物品縮圖" />
                           <span className={styles.zoomHint}>查看詳細</span>
-                          <em>待認領</em>
+                          <em>{report.status === "claim_pending" ? "認領審核中" : "待認領"}</em>
                         </div>
                       </button>
                     ) : (
                       <div className={styles.photo}>
                         <span>暫無照片</span>
-                        <em>待認領</em>
+                        <em>{report.status === "claim_pending" ? "認領審核中" : "待認領"}</em>
                       </div>
                       )}
                     <div className={styles.cardBody}>
                       <h3>{[report.color, report.category].filter(Boolean).join(" ") || "待辨識物品"}</h3>
+                      <p>⌖ {report.location || "地點由保管單位確認"}</p>
+                      <p>◷ {formatTime(report.occurred_at || report.created_at)}</p>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </section>
+            <section className={styles.section}>
+              <div className={styles.sectionTitle}>
+                <div><small>CLAIMED ITEMS</small><h2>已認領物品</h2></div>
+              </div>
+              <div className={styles.grid}>
+                {claimedReports.length === 0 && <p className={styles.empty}>目前還沒有已認領物品。</p>}
+                {claimedReports.map((report) => (
+                  <article className={`${styles.card} ${styles.claimedCard}`} key={report.id}>
+                    {report.image_url ? (
+                      <button
+                        type="button"
+                        className={styles.photoButton}
+                        onClick={() => setSelectedReport(report)}
+                        aria-label={`查看 ${report.description || "已認領物品"} 詳細資料`}
+                      >
+                        <div className={styles.photo}>
+                          <img src={apiImage(report.image_url) ?? ""} alt="已認領物品縮圖" />
+                          <span className={styles.zoomHint}>查看詳細</span>
+                          <em className={styles.claimedBadge}>已認領</em>
+                        </div>
+                      </button>
+                    ) : (
+                      <div className={styles.photo}><span>暫無照片</span><em className={styles.claimedBadge}>已認領</em></div>
+                    )}
+                    <div className={styles.cardBody}>
+                      <h3>{[report.color, report.category].filter(Boolean).join(" ") || "已認領物品"}</h3>
                       <p>⌖ {report.location || "地點由保管單位確認"}</p>
                       <p>◷ {formatTime(report.occurred_at || report.created_at)}</p>
                     </div>
@@ -385,6 +430,14 @@ export default function MobilePage() {
               <label>可能遺失時間（選填）<input type="datetime-local" value={lostTime} onChange={(e) => setLostTime(e.target.value)} /></label>
               <button className={styles.submit} disabled={loading}>{loading ? "AI 比對中…" : "開始 AI 比對"}</button>
             </form>
+
+            {searchPerformed && matches.length === 0 && (
+              <section className={styles.noResults} role="status">
+                <span>⌕</span>
+                <h2>目前無符合的物品</h2>
+                <p>這次沒有找到相似的拾獲物。案件已保留，之後有新的物品登記時，系統會繼續比對。</p>
+              </section>
+            )}
 
             {matches.length > 0 && (
               <section className={styles.results}>
@@ -449,11 +502,14 @@ export default function MobilePage() {
               <p className={styles.detailDescription}>
                 {selectedReport.description || "拾獲者尚未提供補充描述。"}
               </p>
-+              <dl className={styles.detailList}>
+              <dl className={styles.detailList}>
                 <div><dt>拾獲地點</dt><dd>{selectedReport.location || "由保管單位確認"}</dd></div>
                 <div><dt>拾獲時間</dt><dd>{formatTime(selectedReport.occurred_at || selectedReport.created_at)}</dd></div>
-                <div><dt>目前狀態</dt><dd>{selectedReport.status === "open" ? "待認領" : selectedReport.status}</dd></div>
+                <div><dt>目前狀態</dt><dd>{selectedReport.status === "returned" ? "已認領" : selectedReport.status === "claim_pending" ? "認領審核中" : "待認領"}</dd></div>
                 {selectedReport.brand && <div><dt>辨識品牌</dt><dd>{selectedReport.brand}</dd></div>}
+                {selectedReport.distinctive_features.length > 0 && (
+                  <div><dt>外觀特色</dt><dd>{selectedReport.distinctive_features.join("、")}</dd></div>
+                )}
               </dl>
               <button type="button" className={styles.modalDone} onClick={() => setSelectedReport(null)}>
                 看完了

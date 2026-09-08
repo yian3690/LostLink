@@ -16,11 +16,15 @@ async function forward(request: NextRequest, method: "PATCH" | "DELETE") {
   if (typeof payload.id !== "string" || !idPattern.test(payload.id)) {
     return Response.json({ detail: "Invalid report ID" }, { status: 422 });
   }
-  if (method === "PATCH" && (typeof payload.description !== "string" || !payload.description.trim())) {
-    return Response.json({ detail: "Description is required" }, { status: 422 });
-  }
+  const isStatusUpdate =
+    method === "PATCH" && ["open", "returned"].includes(payload.status);
+  if (
+    method === "PATCH" &&
+    !isStatusUpdate &&
+    (typeof payload.description !== "string" || !payload.description.trim())
+  ) return Response.json({ detail: "Description or status is required" }, { status: 422 });
   const response = await fetch(
-    `${backend}/api/v1/admin/reports/${encodeURIComponent(payload.id)}`,
+    `${backend}/api/v1/admin/reports/${encodeURIComponent(payload.id)}${isStatusUpdate ? "/status" : ""}`,
     {
       method,
       headers: {
@@ -28,7 +32,11 @@ async function forward(request: NextRequest, method: "PATCH" | "DELETE") {
         ...(method === "PATCH" ? { "Content-Type": "application/json" } : {}),
       },
       body: method === "PATCH"
-        ? JSON.stringify({ description: payload.description.trim() })
+        ? JSON.stringify(
+            isStatusUpdate
+              ? { status: payload.status }
+              : { description: payload.description.trim() },
+          )
         : undefined,
       cache: "no-store",
     },
