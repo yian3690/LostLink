@@ -22,10 +22,10 @@ from app.models.entities import (
     new_id,
 )
 from app.schemas.reports import DashboardStats, ReportCreate
-from app.services.ai import MultimodalAnalyzer, get_embedding_service
-from app.services.matching import score_reports
+from app.services.ai import CATEGORY_TERMS, MultimodalAnalyzer, get_embedding_service
+from app.services.matching import MatchResult, location_score, score_reports
 from app.services.line import LineClient
-from app.services.line import extract_location
+from app.services.line import extract_location, extract_time_hint, time_hint_matches
 
 
 class ReportService:
@@ -60,6 +60,7 @@ class ReportService:
                 setattr(duplicate, "_was_deduplicated", True)
                 return duplicate, await self.list_matches(duplicate.id)
 
+        time_hint = extract_time_hint(description)
         report = ItemReport(
             user_id=user.id if user else None,
             kind=payload.kind,
@@ -70,7 +71,7 @@ class ReportService:
             distinctive_features=attributes.distinctive_features,
             campus=payload.campus,
             location=location,
-            occurred_at=payload.occurred_at,
+            occurred_at=payload.occurred_at or (time_hint[0] if time_hint else None),
         )
         self.session.add(report)
         await self.session.flush()
@@ -107,6 +108,117 @@ class ReportService:
         await self.session.refresh(report, attribute_names=["images"])
         await self._dispatch_notifications(matches)
         return report, matches
+
+    async def search_found(
+        self,
+        description: str,
+        image_bytes: bytes | None = None,
+        location: str | None = None,
+        limit: int = 3,
+    ) -> list[tuple[ItemReport, MatchResult]]:
+        """Search open found items without creating a lost-item database record."""
+        if image_bytes:
+            self._validate_image(image_bytes)
+        attributes = await self.analyzer.analyze(description, image_bytes)
+        generic_item_query = self._is_generic_item_query(description) and not image_bytes
+        if generic_item_query:
+            # Do not let place words (for example, "圖書館") make the LLM guess
+            # an item category (for example, "book") when no item was supplied.
+            attributes.category = "other"
+        normalized = attributes.normalized_description or description
+        time_hint = extract_time_hint(description)
+        query_report = ItemReport(
+            kind="lost",
+            description=normalized,
+            category=attributes.category,
+            brand=attributes.brand,
+            color=attributes.color,
+            distinctive_features=attributes.distinctive_features,
+            location=location or extract_location(description),
+            occurred_at=time_hint[0] if time_hint else None,
+        )
+        siglip_text = await self.embeddings.encode_siglip_text(normalized)
+        siglip_image = (
+            await self.embeddings.encode_siglip_image(image_bytes)
+            if image_bytes
+            else None
+        )
+        query_report.embedding = ItemEmbedding(
+            e5_text=await self.embeddings.encode_e5(normalized),
+            # score_reports compares the lost-side SigLIP vector with the found
+            # image vector. For a temporary photo query, use its image vector.
+            siglip_text=siglip_image or siglip_text,
+            siglip_image=siglip_image,
+            e5_model=self.settings.e5_model,
+            siglip_model=self.settings.siglip_model,
+        )
+        candidates = list(
+            await self.session.scalars(
+                select(ItemReport)
+                .options(
+                    selectinload(ItemReport.embedding),
+                    selectinload(ItemReport.images),
+                )
+                .where(ItemReport.kind == "found", ItemReport.status == "open")
+                .limit(100)
+            )
+        )
+        equivalent_categories = {
+            "bottle": {"bottle", "drink"},
+            "drink": {"bottle", "drink"},
+        }
+        if query_report.category and query_report.category != "other":
+            allowed = equivalent_categories.get(
+                query_report.category,
+                {query_report.category},
+            )
+            candidates = [item for item in candidates if item.category in allowed]
+        location_was_used = bool(query_report.location)
+        if query_report.location:
+            candidates = [
+                item
+                for item in candidates
+                if location_score(query_report.location, item.location) > 0
+            ]
+        time_was_used = bool(time_hint)
+        if time_hint:
+            center, uncertainty = time_hint
+            close_in_time = []
+            for item in candidates:
+                item_time = item.occurred_at or item.created_at
+                if time_hint_matches(item_time, center, uncertainty):
+                    close_in_time.append(item)
+            candidates = close_in_time
+
+        ranked: list[tuple[ItemReport, MatchResult]] = []
+        for candidate in candidates:
+            result = score_reports(
+                query_report,
+                candidate,
+                self.settings.match_notify_threshold,
+                self.settings.match_review_threshold,
+            )
+            same_category = bool(
+                query_report.category
+                and candidate.category
+                and candidate.category
+                in equivalent_categories.get(
+                    query_report.category,
+                    {query_report.category},
+                )
+            )
+            # A location-only query is useful even when the item category is not
+            # known yet. Location filtering itself is sufficient evidence to list
+            # candidates, while specific item queries still use similarity scores.
+            has_explicit_filter = location_was_used or time_was_used
+            floor = (
+                0.0
+                if has_explicit_filter and query_report.category == "other"
+                else (0.22 if same_category else 0.42)
+            )
+            if result.score >= floor:
+                ranked.append((candidate, result))
+        return sorted(ranked, key=lambda pair: pair[1].score, reverse=True)[:limit]
 
     async def refine(
         self, report: ItemReport, detail: str
@@ -399,20 +511,30 @@ class ReportService:
             if existing is None:
                 self.session.add(match)
             matches.append(match)
-            if result.decision == "notify" and lost.user_id:
+        await self.session.flush()
+        ranked = sorted(matches, key=lambda item: item.score, reverse=True)
+        # A found item can have only one true owner. Notify only the single
+        # highest-confidence lost report; keep other candidates for admin review.
+        best = next((item for item in ranked if item.decision == "notify"), None)
+        if best:
+            lost = await self.session.get(ItemReport, best.lost_report_id)
+            existing_notification = await self.session.scalar(
+                select(Notification).where(Notification.match_id == best.id)
+            )
+            if lost and lost.user_id and not existing_notification:
                 self.session.add(
                     Notification(
-                        match_id=match.id,
+                        match_id=best.id,
                         user_id=lost.user_id,
                         payload={
                             "message": "找到一個可能與你的物品相符的失物。",
-                            "score": result.score,
-                            "reasons": result.reasons,
+                            "score": best.score,
+                            "reasons": best.reasons,
                         },
                     )
                 )
         await self.session.flush()
-        return sorted(matches, key=lambda item: item.score, reverse=True)
+        return ranked
 
     async def _dispatch_notifications(
         self, matches: list[MatchCandidate]
@@ -437,9 +559,23 @@ class ReportService:
             try:
                 await client.push(
                     user.line_user_id,
-                    "找到一個可能與你的物品相符的失物。"
-                    f"\n配對信心：{match.score:.0%}"
-                    f"\n原因：{'、'.join(match.reasons) or '多項特徵接近'}",
+                    [
+                        {
+                            "type": "text",
+                            "text": (
+                                "有人撿到一件很像你遺失物的東西，請再確認一下。"
+                                f"\n配對信心：{match.score:.0%}"
+                                f"\n原因：{'、'.join(match.reasons) or '多項特徵接近'}"
+                                "\n這只是候選結果，確認特徵後再提出認領。"
+                            ),
+                            "quickReply": {
+                                "items": [
+                                    {"type": "action", "action": {"type": "message", "label": "查看候選照片", "text": "再給我看一次照片"}},
+                                    {"type": "action", "action": {"type": "message", "label": "不是我的", "text": "這不是我的"}},
+                                ]
+                            },
+                        }
+                    ],
                 )
             except Exception:
                 notification.attempts += 1
@@ -528,6 +664,21 @@ class ReportService:
         ):
             normalized = normalized.replace(phrase, "")
         return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", normalized)
+
+    @staticmethod
+    def _contains_specific_item(text: str) -> bool:
+        normalized = text.casefold()
+        return any(
+            term.casefold() in normalized
+            for terms in CATEGORY_TERMS.values()
+            for term in terms
+        )
+
+    @staticmethod
+    def _is_generic_item_query(text: str) -> bool:
+        if not any(term in text for term in ("東西", "物品", "某樣", "某個")):
+            return False
+        return not ReportService._contains_specific_item(text)
 
     @staticmethod
     def _decode_image(encoded: str | None) -> bytes | None:

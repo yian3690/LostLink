@@ -21,7 +21,7 @@ CATEGORY_TERMS = {
     "card": ("學生證", "悠遊卡", "信用卡", "證件"),
     "umbrella": ("雨傘", "傘"),
     "drink": ("飲料", "瓶裝飲料", "寶特瓶", "礦泉水", "茶飲", "咖啡"),
-    "bottle": ("水壺", "保溫瓶", "水瓶"),
+    "bottle": ("水壺", "水杯", "保溫杯", "保溫瓶", "隨行杯", "水瓶", "瓶子"),
     "bag": ("背包", "書包", "提袋", "袋子"),
     "laptop": ("筆電", "電腦", "macbook", "notebook"),
 }
@@ -91,6 +91,14 @@ IMAGE_FEATURE_PROMPTS = {
     "strap": "an object with a strap, cord, or keychain",
     "scratched": "an object with visible scratches or wear",
 }
+IMAGE_MATERIAL_PROMPTS = {
+    "leather": "an object mainly made of leather or synthetic leather",
+    "metal": "an object mainly made of metal",
+    "plastic": "an object mainly made of plastic",
+    "fabric": "an object mainly made of fabric or canvas",
+    "rubber": "an object mainly made of rubber or silicone",
+    "glass": "an object mainly made of glass",
+}
 CATEGORY_ZH = {
     "earphones": "耳機",
     "phone": "手機",
@@ -141,6 +149,14 @@ FEATURE_ZH = {
     "strap": "附帶子、掛繩或吊飾",
     "scratched": "有刮痕或使用痕跡",
 }
+MATERIAL_ZH = {
+    "leather": "皮革或合成皮材質",
+    "metal": "金屬材質",
+    "plastic": "塑膠材質",
+    "fabric": "布料或帆布材質",
+    "rubber": "橡膠或矽膠材質",
+    "glass": "玻璃材質",
+}
 
 
 def _contains(text: str, terms: tuple[str, ...]) -> bool:
@@ -158,9 +174,19 @@ class MultimodalAnalyzer:
         if self.settings.demo_mode:
             return await self._local_multimodal(description, image_bytes)
         try:
-            return await OllamaService(self.settings).extract_item(
+            attributes = await OllamaService(self.settings).extract_item(
                 description, image_bytes
             )
+            rules = self._rule_based(description, bool(image_bytes))
+            attributes.category = attributes.category or rules.category
+            attributes.color = attributes.color or rules.color
+            attributes.brand = attributes.brand or rules.brand
+            attributes.distinctive_features = list(
+                dict.fromkeys(
+                    [*attributes.distinctive_features, *rules.distinctive_features]
+                )
+            )
+            return attributes
         except (httpx.HTTPError, RuntimeError, ValueError, json.JSONDecodeError):
             # Registration remains available if the local Ollama service is stopped.
             return await self._local_multimodal(description, image_bytes)
@@ -189,6 +215,9 @@ class MultimodalAnalyzer:
                 "feature": await embeddings.best_siglip_label(
                     image_bytes, IMAGE_FEATURE_PROMPTS
                 ),
+                "material": await embeddings.best_siglip_label(
+                    image_bytes, IMAGE_MATERIAL_PROMPTS
+                ),
             }
 
         category = attributes.category or detected["category"]
@@ -196,7 +225,8 @@ class MultimodalAnalyzer:
         features = list(attributes.distinctive_features)
         shape = SHAPE_ZH.get(detected.get("shape", ""))
         feature = FEATURE_ZH.get(detected.get("feature", ""))
-        for value in (shape, feature):
+        material = MATERIAL_ZH.get(detected.get("material", ""))
+        for value in (shape, feature, material):
             if value and value not in features:
                 features.append(value)
 
@@ -270,6 +300,27 @@ class MultimodalAnalyzer:
         for pattern in ("pro", "刻字", "刮痕", "保護殼", "吊飾", "貼紙"):
             if pattern in lowered:
                 features.append(pattern)
+        text_features = {
+            "牛皮": "牛皮材質",
+            "真皮": "真皮材質",
+            "皮革": "皮革材質",
+            "帆布": "帆布材質",
+            "布料": "布料材質",
+            "金屬": "金屬材質",
+            "塑膠": "塑膠材質",
+            "矽膠": "矽膠材質",
+            "拉鍊": "拉鍊開合",
+            "磁扣": "磁扣開合",
+            "摺疊": "可摺疊",
+            "折疊": "可折疊",
+            "素面": "素面",
+            "紋路": "有表面紋路",
+            "logo": "有品牌標誌",
+            "標誌": "有品牌標誌",
+        }
+        for term, feature in text_features.items():
+            if term in lowered and feature not in features:
+                features.append(feature)
         normalized = text
         if has_image and not normalized:
             normalized = "使用者上傳的拾獲物品照片"

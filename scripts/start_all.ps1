@@ -6,6 +6,10 @@ $pythonPath = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $adminDir = Join-Path $projectRoot "admin-web"
 $nextCli = Join-Path $adminDir "node_modules\next\dist\bin\next"
 $ngrokConfig = Join-Path $runtimeDir "ngrok.yml"
+$ngrokDomainFile = Join-Path $runtimeDir "ngrok-domain.txt"
+$ngrokDomain = if (Test-Path -LiteralPath $ngrokDomainFile) {
+    (Get-Content -Raw -LiteralPath $ngrokDomainFile).Trim() -replace '^https?://', '' -replace '/.*$', ''
+} else { $null }
 $ngrokCommand = Get-Command ngrok -ErrorAction SilentlyContinue
 $ngrok = $null
 $ngrokProcessId = $null
@@ -72,6 +76,7 @@ $backend = Start-Process -FilePath $pythonPath -ArgumentList @("-m", "uvicorn", 
 $nodePath = (Get-Command node -ErrorAction Stop).Source
 $env:NEXT_PUBLIC_API_URL = ""
 $env:BACKEND_INTERNAL_URL = "http://127.0.0.1:8000"
+if ($ngrokDomain) { $env:NEXT_ALLOWED_DEV_ORIGINS = $ngrokDomain }
 $nextCache = Join-Path $adminDir ".next"
 if (Test-Path -LiteralPath $nextCache) {
     $resolvedCache = [IO.Path]::GetFullPath($nextCache)
@@ -101,14 +106,26 @@ try {
     if (Test-Path -LiteralPath $ngrokConfig) {
         if (-not $ngrokCommand) { throw "已設定 ngrok，但找不到 ngrok.exe。" }
         $ngrokArgs = @("http", "3000", "--config", "`"$ngrokConfig`"")
+        if ($ngrokDomain) { $ngrokArgs += "--domain=$ngrokDomain" }
         $ngrok = Start-Process -FilePath $ngrokCommand.Source -ArgumentList $ngrokArgs -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $runtimeDir "ngrok.log") -RedirectStandardError (Join-Path $runtimeDir "ngrok-error.log")
         for ($attempt = 0; $attempt -lt 40; $attempt++) {
             if ($ngrok.HasExited) { throw "ngrok 啟動失敗，請查看 .runtime/ngrok-error.log。" }
-            try {
-                $tunnels = (Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 2).tunnels
-                $publicUrl = @($tunnels | Where-Object { $_.public_url -like "https://*" })[0].public_url
-                if ($publicUrl) { break }
-            } catch { }
+            if ($ngrokDomain) {
+                try {
+                    $fixedUrl = "https://$ngrokDomain"
+                    $response = Invoke-WebRequest -Uri "$fixedUrl/health" -UseBasicParsing -TimeoutSec 2
+                    if ($response.StatusCode -lt 500) {
+                        $publicUrl = $fixedUrl
+                        break
+                    }
+                } catch { }
+            } else {
+                try {
+                    $tunnels = (Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 2).tunnels
+                    $publicUrl = @($tunnels | Where-Object { $_.public_url -like "https://*" })[0].public_url
+                    if ($publicUrl) { break }
+                } catch { }
+            }
             Start-Sleep -Milliseconds 500
         }
         if (-not $publicUrl) { throw "ngrok 公開網址取得逾時。" }

@@ -28,6 +28,10 @@ lostlink.db
 admin-web/node_modules/
 admin-web/.next/
 admin-web/.env.local
+*.tsbuildinfo
+
+# Generated Windows launcher compatibility files
+scripts/.compat-*.ps1
 
 # Local model cache (if redirected into the project)
 .cache/

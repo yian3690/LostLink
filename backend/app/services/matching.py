@@ -1,4 +1,5 @@
 import math
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -42,13 +43,47 @@ def calibrated_siglip_score(raw_cosine: float) -> float:
 def location_score(left: str | None, right: str | None) -> float:
     if not left or not right:
         return 0.0
-    a, b = left.casefold(), right.casefold()
+
+    def normalize(value: str) -> str:
+        normalized = (
+            value.casefold()
+            .replace("學餐", "學生餐廳")
+            .replace("綜大", "綜合大樓")
+            .replace("教大", "教學大樓")
+        )
+        chinese_floors = {
+            "十二": "12",
+            "十一": "11",
+            "十": "10",
+            "九": "9",
+            "八": "8",
+            "七": "7",
+            "六": "6",
+            "五": "5",
+            "四": "4",
+            "三": "3",
+            "二": "2",
+            "一": "1",
+        }
+        for label, number in chinese_floors.items():
+            normalized = normalized.replace(f"{label}樓", f"{number}f")
+        normalized = re.sub(r"(\d+)\s*樓", r"\1f", normalized)
+        # Campus room numbers normally encode their floor (301 -> 3F,
+        # 1201 -> 12F). Add that as a searchable token without discarding the
+        # original room number.
+        for room in re.findall(r"(?<!\d)(\d{3,4})\s*教室", normalized):
+            floor = int(room) // 100
+            if floor > 0:
+                normalized += f" {floor}f"
+        return normalized
+
+    a, b = normalize(left), normalize(right)
     if a == b:
         return 1.0
     if a in b or b in a:
         return 0.85
-    tokens_a = set(a.replace("樓", "f").split())
-    tokens_b = set(b.replace("樓", "f").split())
+    tokens_a = set(a.split())
+    tokens_b = set(b.split())
     overlap = len(tokens_a & tokens_b)
     return overlap / max(1, len(tokens_a | tokens_b))
 

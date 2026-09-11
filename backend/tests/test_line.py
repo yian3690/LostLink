@@ -4,12 +4,15 @@ import hmac
 from types import SimpleNamespace
 
 from app.core.config import Settings
+from app.services.matching import location_score
 from app.services.line import (
     LineClient,
     build_match_messages,
     build_match_reply,
     extract_location,
+    extract_time_hint,
     parse_report_kind,
+    time_hint_matches,
 )
 
 
@@ -41,7 +44,15 @@ def test_parse_report_kind() -> None:
     assert parse_report_kind("我有遺失這個") == ("lost", "這個")
     assert parse_report_kind("你能列目前的遺失物嗎")[0] is None
     assert extract_location("我在ZB302教室有東西不見") == "ZB302教室"
-    assert extract_location("我的耳機在圖書館三樓不見了") == "圖書館 三F"
+    assert extract_location("我的耳機在圖書館三樓不見了") == "圖書館 3F"
+    assert extract_location("紫色錢包，牛皮的，在走廊撿到") == "走廊"
+    assert extract_location("我在二樓樓梯間撿到雨傘") == "2F 樓梯間"
+    assert extract_location("我今天在學餐有東西不見") == "學生餐廳"
+    assert extract_location("我在三樓有東西不見") == "3F"
+    assert location_score("學餐", "學生餐廳 1F 靠窗座位") > 0
+    assert location_score("三樓", "教學大樓 3F 服務台") > 0
+    assert location_score("三樓", "綜合大樓 301 教室") > 0
+    assert location_score("三樓", "學生餐廳 1F 靠窗座位") == 0
 
 
 def test_match_reply_reports_found_and_not_found() -> None:
@@ -57,3 +68,44 @@ def test_match_reply_reports_found_and_not_found() -> None:
     assert [message["type"] for message in messages] == ["text", "image", "text"]
     assert messages[1]["previewImageUrl"].startswith("https://")
     assert len(messages[2]["quickReply"]["items"]) == 3
+
+
+def test_extract_time_hint_understands_common_chinese_time() -> None:
+    datetime_module = __import__("datetime")
+    now = datetime_module.datetime(
+        2026,
+        9,
+        11,
+        13,
+        30,
+        tzinfo=datetime_module.timezone(datetime_module.timedelta(hours=8)),
+    )
+    yesterday, uncertainty = extract_time_hint("我昨天下午在圖書館掉了飲料", now)
+    assert yesterday.strftime("%Y-%m-%d %H:%M") == "2026-09-10 15:00"
+    assert uncertainty == 4.0
+    exact, uncertainty = extract_time_hint("9/7 下午6點在教室", now)
+    assert exact.strftime("%Y-%m-%d %H:%M") == "2026-09-07 18:00"
+    assert uncertainty == 1.0
+    current, uncertainty = extract_time_hint("這是現在撿到的", now)
+    assert current == now
+    assert uncertainty == 3.0
+
+
+def test_date_only_time_hint_matches_only_that_calendar_day() -> None:
+    datetime_module = __import__("datetime")
+    taipei = datetime_module.timezone(datetime_module.timedelta(hours=8))
+    center, uncertainty = extract_time_hint(
+        "我的雨傘在 9/10 不見了",
+        datetime_module.datetime(2026, 9, 11, 16, 0, tzinfo=taipei),
+    )
+
+    assert time_hint_matches(
+        datetime_module.datetime(2026, 9, 10, 16, 40, tzinfo=taipei),
+        center,
+        uncertainty,
+    )
+    assert not time_hint_matches(
+        datetime_module.datetime(2026, 9, 9, 16, 40, tzinfo=taipei),
+        center,
+        uncertainty,
+    )

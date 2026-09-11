@@ -28,7 +28,7 @@ flowchart LR
     APP --> E5[multilingual-e5-base<br/>中文文字 Embedding]
     APP --> SIGLIP[SigLIP 2 Base 256<br/>文字／圖片 Embedding]
     APP --> OBJECT[物件儲存<br/>照片原檔與縮圖]
-    APP --> DB[(PostgreSQL)]
+    APP --> DB[(SQLite 本機展示<br/>PostgreSQL 正式部署)]
     E5 --> VECTOR[(pgvector<br/>文字向量索引)]
     SIGLIP --> VECTOR2[(pgvector<br/>圖文向量索引)]
     VECTOR --> DB
@@ -53,8 +53,8 @@ flowchart LR
 | 對話與多模態理解 | Ollama / Gemma 3 4B | 本機自然對話，並從文字與照片抽取類別、品牌、顏色及特色 |
 | 文字檢索 | multilingual-e5-base | 比較中文報失與拾獲描述的語意相似度 |
 | 跨模態檢索 | google/siglip2-base-patch16-256 | 比較文字與圖片、圖片與圖片的相似度 |
-| 主資料庫 | PostgreSQL | 使用者、案件、狀態、通知、認領與稽核紀錄 |
-| 向量搜尋 | pgvector | 保存 E5／SigLIP 2 向量並執行 cosine、HNSW 搜尋 |
+| 主資料庫 | SQLite（本機）／PostgreSQL（部署） | 使用者、案件、狀態、通知、認領與稽核紀錄 |
+| 向量搜尋 | 應用層 cosine（本機）／pgvector（部署） | 保存並搜尋 E5／SigLIP 2 向量 |
 | 圖片儲存 | Supabase Storage 或 S3 相容服務 | 保存原圖與縮圖，資料庫只存路徑及 metadata |
 | 管理後台 | Next.js | 人工複核、案件管理、領回確認與營運儀表板 |
 
@@ -200,18 +200,27 @@ LostLink AI/
 
 ### Windows 一鍵啟動（建議）
 
-直接雙擊專案根目錄的 **`啟動 LostLink AI.cmd`**。系統會自動檢查環境、啟動 FastAPI 與 Next.js、等待服務就緒，再開啟手機版頁面。首次執行時也會自動安裝缺少的套件。
+直接雙擊專案根目錄的 **`啟動 LostLink.bat`**。系統會自動檢查環境，啟動 Ollama、FastAPI、SQLite、Next.js 與已設定的 ngrok，等待服務就緒後開啟手機版頁面。首次執行時也會自動安裝缺少的前端套件。
 
-啟動視窗會顯示同一 Wi-Fi 手機網址；若已設定 ngrok，也會顯示評審可從外網開啟的 HTTPS、Webhook 與 LIFF Endpoint。使用完畢後雙擊 **`停止 LostLink AI.cmd`**；執行記錄與本機密鑰位於 Git 已忽略的 `.runtime`。
+啟動視窗會顯示同一 Wi-Fi 手機網址；若已設定 ngrok，也會顯示評審可從外網開啟的 HTTPS、Webhook 與 LIFF Endpoint。使用完畢後雙擊 **`關閉 LostLink.bat`**。原有的 **`啟動 LostLink AI.cmd`**／**`停止 LostLink AI.cmd`** 仍可使用；新版 BAT 額外處理 Windows PowerShell 5.1 的 UTF-8 相容問題。
+
+本機使用 `lostlink.db`；啟動後端時資料庫會自動開啟，不需要另外啟動資料庫程式。執行紀錄、管理金鑰、ngrok token 與固定網域設定都位於 Git 已忽略的 `.runtime/`。
 
 ### 免費 ngrok HTTPS（只需設定一次）
 
 1. 登入 ngrok Dashboard，進入 **Your Authtoken** 並複製 Authtoken。
 2. 雙擊 **`設定 ngrok.cmd`**，在本機視窗貼上；輸入不會顯示，也不需要傳給其他人。
-3. 雙擊 **`啟動 LostLink AI.cmd`**。啟動視窗會列出三個可直接使用的網址。
-4. 之後可雙擊 **`查看 LostLink AI 公開網址.cmd`** 再次查看。
+3. 在 ngrok Dashboard 的 **Domains** 找到帳號的固定開發網域，將純網域名稱寫入 `.runtime/ngrok-domain.txt`：
 
-免費方案會配置固定的開發網域；一鍵啟動會把 `https://該網域/mobile` 提供給 LIFF，並把 `https://該網域/webhooks/line` 提供給 Messaging API。電腦必須保持開機且程式持續執行，公開網址才有服務。
+   ```powershell
+   New-Item -ItemType Directory -Force .runtime | Out-Null
+   Set-Content .runtime/ngrok-domain.txt "你的固定網域.ngrok-free.dev"
+   ```
+
+4. 雙擊 **`啟動 LostLink.bat`**。啟動視窗會列出三個可直接使用的網址。
+5. 之後可雙擊 **`查看 LostLink AI 公開網址.cmd`** 再次查看。
+
+一鍵啟動會把 `https://該網域/mobile` 提供給 LIFF，並把 `https://該網域/webhooks/line` 提供給 Messaging API。電腦必須保持開機且程式持續執行，公開網址才有服務。
 
 ### LINE 對話測試資料
 
@@ -282,11 +291,11 @@ pip install -r requirements-ml.txt
 ollama pull gemma3:4b
 ```
 
-至少設定：
+本機展示可繼續使用 SQLite；若要部署 PostgreSQL／pgvector，再將 `DATABASE_URL` 改為 PostgreSQL。至少設定：
 
 ```dotenv
 DEMO_MODE=false
-DATABASE_URL=postgresql+asyncpg://lostlink:password@localhost:5432/lostlink
+DATABASE_URL=sqlite+aiosqlite:///./lostlink.db
 LINE_CHANNEL_SECRET=...
 LINE_CHANNEL_ACCESS_TOKEN=...
 OLLAMA_BASE_URL=http://127.0.0.1:11434
@@ -294,11 +303,13 @@ OLLAMA_MODEL=gemma3:4b
 ADMIN_API_KEY=...
 ```
 
-正式模式第一次使用 E5／SigLIP 2 時會從 Hugging Face 下載模型權重。Gemma 3 權重由 Ollama 保存在專案資料夾之外，不會被提交到 GitHub。LINE Developers 的 Webhook URL 設為：
+正式模式第一次使用 E5／SigLIP 2 時會從 Hugging Face 下載模型權重。Gemma 3 權重由 Ollama 保存在專案資料夾之外，不會被提交到 GitHub。
 
 目前本機展示環境已切換為 `DEMO_MODE=false`，使用 `intfloat/multilingual-e5-base` 與 `google/siglip2-base-patch16-256` 的 768 維正式向量。模型會在後端啟動時預熱並於程序內共用；CPU 模式首次啟動約需數十秒，之後不需任何付費 API。
 
 LINE Bot 每次建立案件後都會回覆比對結果：有候選時顯示候選數量、最高相似度與原因；沒有候選時明確告知目前尚未找到，並保留後續主動通知。
+
+LINE Developers 的 Webhook URL 設為：
 
 ```text
 https://你的公開網域/webhooks/line
@@ -317,6 +328,15 @@ NEXT_PUBLIC_LIFF_ID=你的-LIFF-ID
 4. 重新執行 `npm run build`。LIFF ID 是建置期公開設定；Channel Secret 與 Access Token 仍只能放在後端 `.env`。
 
 未設定 LIFF ID 時，`/mobile` 會以一般瀏覽器 Demo 模式運作，方便先在電腦或手機測試介面。
+
+LINE Login Channel 在 `Developing` 狀態時只有 Admin／Tester 能登入；要讓一般帳號使用必須切換為 `Published`。發布不收取 LINE Login 費用，但狀態不能切回 `Developing`。暫停服務時只需雙擊 **`關閉 LostLink.bat`**；Channel 仍維持 Published，外部網址會暫時無法連線。
+
+目前正式測試使用的固定路徑格式如下：
+
+```text
+LIFF Endpoint: https://你的固定網域/mobile
+Webhook URL:   https://你的固定網域/webhooks/line
+```
 
 ### 常用 API
 
@@ -341,6 +361,18 @@ cd admin-web
 npm run build
 npm audit --audit-level=high
 ```
+
+## Push 到 GitHub 前
+
+`.env`、`.runtime/`、`lostlink.db`、`uploads/`、模型權重、Next.js 建置快取與 TypeScript 增量編譯檔都不應提交。推送前建議執行：
+
+```powershell
+git status --short
+git diff --check
+git diff --cached --check
+```
+
+確認清單中沒有 Channel Secret、Access Token、ngrok Authtoken、管理金鑰、使用者照片或本機資料庫後，再執行 `git add`、`git commit` 與 `git push`。
 
 ## 專案狀態
 

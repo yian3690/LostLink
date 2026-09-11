@@ -12,3 +12,13 @@ def test_rule_based_analyzer_detects_yellow_drink() -> None:
     )
     assert attributes.category == "drink"
     assert attributes.color == "yellow"
+
+
+def test_rule_based_analyzer_treats_thermos_cup_as_bottle() -> None:
+    analyzer = MultimodalAnalyzer(
+        Settings(database_url="sqlite+aiosqlite:///:memory:")
+    )
+    attributes = analyzer._rule_based("黑色保溫杯", has_image=False)
+
+    assert attributes.category == "bottle"
+    assert attributes.color == "black"

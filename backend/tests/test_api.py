@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from app.main import app
-from app.api.line_webhook import _is_list_request
+from app.api.line_webhook import _is_image_search_request, _is_list_request
 from app.services.line import LineClient
 from app.services.ollama import OllamaService
 
@@ -15,6 +15,19 @@ def test_natural_found_item_questions_are_database_searches() -> None:
     assert _is_list_request("目前有人撿到錢包嗎")
     assert _is_list_request("請問有撿到水杯嗎？")
     assert not _is_list_request("你好嗎")
+    assert _is_image_search_request("你有看到類似的嗎")
+    assert _is_image_search_request("幫我找像這張的物品")
+    assert _is_list_request("你有看到圖書館2樓的飲料嗎")
+
+
+def test_generic_item_query_does_not_invent_a_category() -> None:
+    from app.services.reports import ReportService
+
+    assert ReportService._is_generic_item_query("我在圖書館有東西不見")
+    assert not ReportService._is_generic_item_query("我在圖書館有飲料不見")
+    assert not ReportService._is_generic_item_query(
+        "我在三樓有東西不見，後來想找黑色保溫杯"
+    )
 
 
 def test_demo_flow_creates_candidate() -> None:
@@ -195,7 +208,7 @@ def test_line_image_without_intent_is_not_saved(monkeypatch) -> None:
     assert len(after) == len(before)
 
 
-def test_line_combines_location_then_item_into_one_report(monkeypatch) -> None:
+def test_line_combines_clues_and_requires_tracking_confirmation(monkeypatch) -> None:
     async def fake_clarification(self, kind, user_text, previous_context, has_image):
         return "收到地點了，請再告訴我物品名稱或上傳照片。"
 
@@ -242,14 +255,30 @@ def test_line_combines_location_then_item_into_one_report(monkeypatch) -> None:
             "/webhooks/line",
             json=event("我的黃色飲料不見了"),
         )
+        before_confirmation = client.get("/api/v1/reports").json()
+        confirmed = client.post(
+            "/webhooks/line",
+            json={
+                "events": [
+                    {
+                        "type": "postback",
+                        "replyToken": "test-reply-token",
+                        "source": {"type": "user", "userId": "location-first-user"},
+                        "postback": {"data": "action=enable_tracking"},
+                    }
+                ]
+            },
+        )
         after = client.get("/api/v1/reports").json()
 
     assert first.status_code == 200
     assert second.status_code == 200
     assert unselected.status_code == 200
     assert selected.status_code == 200
+    assert confirmed.status_code == 200
     assert len(after_unselected) == len(before)
     assert len(middle) == len(before)
+    assert len(before_confirmation) == len(before)
     assert len(after) == len(before) + 1
     assert after[0]["location"] == "ZB302教室"
     assert after[0]["color"] == "yellow"
@@ -294,6 +323,125 @@ def test_line_general_chat_mode_never_creates_report(monkeypatch) -> None:
     assert selected.status_code == 200
     assert chatted.status_code == 200
     assert len(after) == len(before)
+
+
+def test_line_search_follow_up_combines_item_location_and_date(monkeypatch) -> None:
+    searches = []
+
+    async def fake_search(self, description, image_bytes=None, location=None, limit=3):
+        searches.append((description, location))
+        return []
+
+    monkeypatch.setattr("app.services.reports.ReportService.search_found", fake_search)
+    user_id = "combined-search-context-user"
+
+    def event(text: str) -> dict:
+        return {
+            "events": [
+                {
+                    "type": "message",
+                    "replyToken": "test-reply-token",
+                    "source": {"type": "user", "userId": user_id},
+                    "message": {"type": "text", "text": text},
+                }
+            ]
+        }
+
+    with TestClient(app) as client:
+        client.post("/webhooks/line", json=event("我的雨傘不見了"))
+        client.post("/webhooks/line", json=event("是在綜合大樓不見的"))
+        client.post("/webhooks/line", json=event("是 9/10 不見的"))
+
+    description, location = searches[-1]
+    assert "雨傘" in description
+    assert "綜合大樓" in description
+    assert "9/10" in description
+    assert location == "綜合大樓"
+
+    searches.clear()
+    user_id = "latest-location-wins-user"
+    with TestClient(app) as client:
+        client.post("/webhooks/line", json=event("我今天在學生餐廳有東西不見"))
+        client.post("/webhooks/line", json=event("我在三樓有東西不見"))
+
+    description, location = searches[-1]
+    assert "學生餐廳" in description
+    assert "三樓" in description
+    assert location == "3F"
+
+    searches.clear()
+    user_id = "complete-search-resets-context-user"
+    with TestClient(app) as client:
+        client.post("/webhooks/line", json=event("我在三樓有東西不見"))
+        client.post("/webhooks/line", json=event("你有看到黑色保溫杯嗎"))
+
+    description, location = searches[-1]
+    assert description == "你有看到黑色保溫杯嗎"
+    assert location is None
+
+
+def test_found_registration_keeps_photo_location_features_and_confirms_time(monkeypatch) -> None:
+    buffer = io.BytesIO()
+    Image.new("RGB", (80, 60), color=(85, 45, 105)).save(buffer, "PNG")
+    replies = []
+
+    async def fake_download(self, message_id: str) -> bytes:
+        return buffer.getvalue()
+
+    async def fake_reply(self, reply_token: str, message) -> None:
+        replies.append(message)
+
+    monkeypatch.setattr(LineClient, "download_content", fake_download)
+    monkeypatch.setattr(LineClient, "reply", fake_reply)
+    user_id = "found-time-confirm-user"
+
+    def postback(action: str) -> dict:
+        return {
+            "events": [
+                {
+                    "type": "postback",
+                    "replyToken": "test-reply-token",
+                    "source": {"type": "user", "userId": user_id},
+                    "postback": {"data": action},
+                }
+            ]
+        }
+
+    def message(message_type: str, **values) -> dict:
+        return {
+            "events": [
+                {
+                    "type": "message",
+                    "replyToken": "test-reply-token",
+                    "source": {"type": "user", "userId": user_id},
+                    "message": {"type": message_type, **values},
+                }
+            ]
+        }
+
+    with TestClient(app) as client:
+        before = client.get("/api/v1/reports").json()
+        client.post("/webhooks/line", json=postback("action=start_found"))
+        client.post(
+            "/webhooks/line", json=message("image", id="wallet-photo")
+        )
+        client.post(
+            "/webhooks/line",
+            json=message("text", text="紫色錢包，牛皮的，在走廊撿到"),
+        )
+        before_confirmation = client.get("/api/v1/reports").json()
+        client.post(
+            "/webhooks/line", json=postback("action=confirm_found_now")
+        )
+        after = client.get("/api/v1/reports").json()
+
+    assert len(before_confirmation) == len(before)
+    assert len(after) == len(before) + 1
+    created = after[0]
+    assert created["location"] == "走廊"
+    assert created["occurred_at"] is not None
+    assert "牛皮材質" in created["distinctive_features"]
+    assert "感謝提供資訊" in replies[-1][0]["text"]
 
 
 def test_local_database_admin_crud() -> None:
