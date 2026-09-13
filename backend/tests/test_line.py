@@ -90,6 +90,10 @@ def test_extract_time_hint_understands_common_chinese_time() -> None:
     assert current == now
     assert uncertainty == 3.0
 
+    approximate, uncertainty = extract_time_hint("遺失時間大概早上 10 點多", now)
+    assert approximate.strftime("%Y-%m-%d %H:%M") == "2026-09-11 10:00"
+    assert uncertainty == 2.0
+
 
 def test_date_only_time_hint_matches_only_that_calendar_day() -> None:
     datetime_module = __import__("datetime")

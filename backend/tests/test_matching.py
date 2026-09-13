@@ -77,3 +77,69 @@ def test_siglip_cosine_is_calibrated_for_retrieval() -> None:
     assert calibrated_siglip_score(0.05) == 0.0
     assert calibrated_siglip_score(0.15) == 0.5
     assert calibrated_siglip_score(0.25) == 1.0
+
+def test_missing_optional_fields_do_not_reduce_available_signal_score() -> None:
+    lost = report(
+        "lost",
+        [1.0, 0.0],
+        category="umbrella",
+        color="black",
+    )
+    found = report(
+        "found",
+        [1.0, 0.0],
+        category="umbrella",
+        color="black",
+    )
+
+    result = score_reports(lost, found)
+
+    assert result.score == 1.0
+    assert result.breakdown["category_brand"] == 1.0
+    assert result.breakdown["available_weight"] == 0.85
+
+
+def test_exact_description_has_high_confidence_without_location_or_time() -> None:
+    description = "黑色長柄雨傘，握把為深棕色木質彎把。"
+    lost = report(
+        "lost",
+        [1.0, 0.0],
+        description=description,
+        category="umbrella",
+        color="black",
+    )
+    found = report(
+        "found",
+        [0.1422, 0.9899],
+        description=description,
+        category="umbrella",
+        color="black",
+    )
+
+    result = score_reports(lost, found)
+
+    assert result.score >= 0.90
+    assert result.decision == "notify"
+    assert "完整描述一致" in result.reasons
+
+def test_reusable_bottle_does_not_high_match_disposable_drink() -> None:
+    lost = report(
+        "lost",
+        [1.0, 0.0],
+        description="黑色保溫水壺，附有提帶",
+        category="bottle",
+        color="black",
+    )
+    found = report(
+        "found",
+        [1.0, 0.0],
+        description="黑色寶特瓶，內裝茶飲",
+        category="bottle",
+        color="black",
+    )
+
+    result = score_reports(lost, found)
+
+    assert result.score <= 0.35
+    assert result.decision == "waiting"
+    assert result.breakdown["container_subtype_conflict"] == 1.0

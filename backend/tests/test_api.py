@@ -5,7 +5,11 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from app.main import app
-from app.api.line_webhook import _is_image_search_request, _is_list_request
+from app.api.line_webhook import (
+    _is_image_search_request,
+    _is_list_request,
+    _is_tracking_request,
+)
 from app.services.line import LineClient
 from app.services.ollama import OllamaService
 
@@ -18,6 +22,8 @@ def test_natural_found_item_questions_are_database_searches() -> None:
     assert _is_image_search_request("你有看到類似的嗎")
     assert _is_image_search_request("幫我找像這張的物品")
     assert _is_list_request("你有看到圖書館2樓的飲料嗎")
+    assert _is_tracking_request("幫我建立持續搜尋")
+    assert _is_tracking_request("我要持續協尋")
 
 
 def test_generic_item_query_does_not_invent_a_category() -> None:
@@ -164,6 +170,79 @@ def test_found_photo_has_safe_public_thumbnail_and_kind_filter() -> None:
         assert all(item["kind"] == "found" for item in found_only.json())
 
 
+def test_lost_photo_is_visible_only_to_verified_owner_or_admin(monkeypatch) -> None:
+    buffer = io.BytesIO()
+    Image.new("RGB", (80, 60), color=(35, 40, 45)).save(buffer, "PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    async def fake_verify(self, access_token: str) -> str | None:
+        return "verified-owner" if access_token == "valid-owner-token" else None
+
+    monkeypatch.setattr(LineClient, "verify_access_token", fake_verify)
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/v1/reports",
+            json={
+                "kind": "lost",
+                "description": "黑色水壺",
+                "line_user_id": "verified-owner",
+                "image_base64": encoded,
+            },
+        )
+        assert created.status_code == 201
+        report = created.json()["report"]
+
+        assert client.get(report["image_url"]).status_code == 404
+        assert client.get("/api/v1/reports/mine").status_code == 401
+        mine = client.get(
+            "/api/v1/reports/mine",
+            headers={"Authorization": "Bearer valid-owner-token"},
+        )
+        assert mine.status_code == 200
+        assert any(item["id"] == report["id"] for item in mine.json())
+        updated = client.patch(
+            f"/api/v1/reports/{report['id']}/mine",
+            headers={"Authorization": "Bearer valid-owner-token"},
+            json={
+                "description": "黑色 700ml 水壺，瓶蓋有按鈕",
+                "location": "ZB301 教室",
+                "occurred_at": "2026-09-12T10:00:00+08:00",
+            },
+        )
+        assert updated.status_code == 200
+        assert updated.json()["report"]["location"] == "ZB301 教室"
+        assert updated.json()["report"]["occurred_at"].startswith("2026-09-12T10:00:00")
+
+        manual = client.patch(
+            f"/api/v1/admin/reports/{report['id']}",
+            headers={"X-Admin-Key": "test-admin-key"},
+            json={
+                "description": "黑色 700ml 運動水壺",
+                "location": "ZB301 教室",
+                "occurred_at": "2026-09-12T10:00:00+08:00",
+                "category": "bottle",
+                "brand": "Guide To Life",
+                "color": "black",
+                "distinctive_features": ["瓶蓋有按鈕", "瓶身有刻度"],
+            },
+        )
+        assert manual.status_code == 200
+        assert manual.json()["report"]["color"] == "black"
+        assert manual.json()["report"]["brand"] == "Guide To Life"
+        assert manual.json()["report"]["distinctive_features"] == ["瓶蓋有按鈕", "瓶身有刻度"]
+        owner_image = client.get(
+            f"/api/v1/reports/{report['id']}/owner-image",
+            headers={"Authorization": "Bearer valid-owner-token"},
+        )
+        assert owner_image.status_code == 200
+        admin_image = client.get(
+            f"/api/v1/admin/reports/{report['id']}/image",
+            headers={"X-Admin-Key": "test-admin-key"},
+        )
+        assert admin_image.status_code == 200
+
+
 def test_invalid_image_is_rejected() -> None:
     encoded = base64.b64encode(b"not-an-image").decode("ascii")
     with TestClient(app) as client:
@@ -178,34 +257,129 @@ def test_invalid_image_is_rejected() -> None:
         assert response.status_code == 422
 
 
-def test_line_image_without_intent_is_not_saved(monkeypatch) -> None:
+def test_owner_can_resolve_search_with_matched_found_item(monkeypatch) -> None:
+    async def fake_verify(self, access_token: str) -> str | None:
+        return "resolve-owner" if access_token == "resolve-owner-token" else None
+
+    monkeypatch.setattr(LineClient, "verify_access_token", fake_verify)
+    headers = {"Authorization": "Bearer resolve-owner-token"}
+    with TestClient(app) as client:
+        lost = client.post(
+            "/api/v1/reports",
+            json={
+                "kind": "lost",
+                "description": "黑色長柄雨傘，木質握把，傘緣有灰色反光條",
+                "location": "圖書館一樓入口",
+                "line_user_id": "resolve-owner",
+            },
+        ).json()["report"]
+        found_response = client.post(
+            "/api/v1/reports",
+            json={
+                "kind": "found",
+                "description": "黑色長柄雨傘，木質握把，傘緣有灰色反光條",
+                "location": "圖書館一樓入口",
+                "line_user_id": "resolve-finder",
+            },
+        )
+        found = found_response.json()["report"]
+        assert any(
+            item["lost_report_id"] == lost["id"]
+            for item in found_response.json()["matches"]
+        )
+
+        unresolved = client.post(
+            f"/api/v1/reports/{lost['id']}/mine/resolve",
+            json={"found_report_id": found["id"]},
+        )
+        assert unresolved.status_code == 401
+        resolved = client.post(
+            f"/api/v1/reports/{lost['id']}/mine/resolve",
+            headers=headers,
+            json={"found_report_id": found["id"]},
+        )
+        assert resolved.status_code == 200
+        assert resolved.json()["lost_report"]["status"] == "returned"
+        assert resolved.json()["found_report"]["status"] == "returned"
+
+        reports = client.get("/api/v1/reports?limit=200").json()
+        statuses = {item["id"]: item["status"] for item in reports}
+        assert statuses[lost["id"]] == "returned"
+        assert statuses[found["id"]] == "returned"
+
+
+def test_line_image_asks_intent_before_searching_or_saving(monkeypatch) -> None:
     buffer = io.BytesIO()
     Image.new("RGB", (80, 60), color=(40, 180, 80)).save(buffer, "PNG")
     image_bytes = buffer.getvalue()
+    replies = []
+    searches = []
 
     async def fake_download(self, message_id: str) -> bytes:
         return image_bytes
 
+    async def fake_reply(self, reply_token: str, message) -> None:
+        replies.append(message)
+
+    async def fake_search(self, description, image_bytes=None, location=None, limit=3):
+        searches.append((description, image_bytes))
+        return []
+
     monkeypatch.setattr(LineClient, "download_content", fake_download)
+    monkeypatch.setattr(LineClient, "reply", fake_reply)
+    monkeypatch.setattr("app.services.reports.ReportService.search_found", fake_search)
+    user_id = "photo-intent-user"
+
+    def postback(action: str) -> dict:
+        return {
+            "events": [{
+                "type": "postback",
+                "replyToken": "test-reply-token",
+                "source": {"type": "user", "userId": user_id},
+                "postback": {"data": action},
+            }]
+        }
+
     with TestClient(app) as client:
         before = client.get("/api/v1/reports").json()
         response = client.post(
             "/webhooks/line",
             json={
-                "events": [
-                    {
-                        "type": "message",
-                        "replyToken": "test-reply-token",
-                        "source": {"type": "user", "userId": "photo-only-user"},
-                        "message": {"type": "image", "id": "test-image"},
-                    }
-                ]
+                "events": [{
+                    "type": "message",
+                    "replyToken": "test-reply-token",
+                    "source": {"type": "user", "userId": user_id},
+                    "message": {"type": "image", "id": "test-image"},
+                }]
             },
         )
-        after = client.get("/api/v1/reports").json()
+        after_image = client.get("/api/v1/reports").json()
+        search_response = client.post(
+            "/webhooks/line", json=postback("action=photo_lost")
+        )
+        searched = client.post(
+            "/webhooks/line", json=postback("action=search_photo")
+        )
+        after_search = client.get("/api/v1/reports").json()
 
     assert response.status_code == 200
-    assert len(after) == len(before)
+    assert search_response.status_code == 200
+    assert searched.status_code == 200
+    assert len(after_image) == len(before)
+    assert len(after_search) == len(before)
+    assert len(searches) == 1
+    actions = replies[0][0]["quickReply"]["items"]
+    assert {item["action"]["data"] for item in actions} == {
+        "action=photo_found",
+        "action=photo_lost",
+        "action=continue_chat",
+    }
+    lost_actions = replies[1][0]["quickReply"]["items"]
+    assert {item["action"]["data"] for item in lost_actions} == {
+        "action=search_photo",
+        "action=enable_tracking",
+        "action=continue_chat",
+    }
 
 
 def test_line_combines_clues_and_requires_tracking_confirmation(monkeypatch) -> None:
@@ -267,6 +441,23 @@ def test_line_combines_clues_and_requires_tracking_confirmation(monkeypatch) -> 
                         "postback": {"data": "action=enable_tracking"},
                     }
                 ]
+                },
+            )
+        supplied_time = client.post(
+            "/webhooks/line",
+            json=event("遺失時間大概早上 10 點多"),
+        )
+        created = client.post(
+            "/webhooks/line",
+            json={
+                "events": [
+                    {
+                        "type": "postback",
+                        "replyToken": "test-reply-token",
+                        "source": {"type": "user", "userId": "location-first-user"},
+                        "postback": {"data": "action=confirm_tracking"},
+                    }
+                ]
             },
         )
         after = client.get("/api/v1/reports").json()
@@ -276,6 +467,8 @@ def test_line_combines_clues_and_requires_tracking_confirmation(monkeypatch) -> 
     assert unselected.status_code == 200
     assert selected.status_code == 200
     assert confirmed.status_code == 200
+    assert supplied_time.status_code == 200
+    assert created.status_code == 200
     assert len(after_unselected) == len(before)
     assert len(middle) == len(before)
     assert len(before_confirmation) == len(before)
@@ -442,6 +635,7 @@ def test_found_registration_keeps_photo_location_features_and_confirms_time(monk
     assert created["occurred_at"] is not None
     assert "牛皮材質" in created["distinctive_features"]
     assert "感謝提供資訊" in replies[-1][0]["text"]
+    assert len(replies[-1]) == 1
 
 
 def test_local_database_admin_crud() -> None:

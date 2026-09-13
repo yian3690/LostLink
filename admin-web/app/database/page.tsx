@@ -9,6 +9,7 @@ type Report = {
   status: string;
   description: string;
   category: string | null;
+  brand: string | null;
   color: string | null;
   distinctive_features: string[];
   location: string | null;
@@ -28,6 +29,13 @@ function formatDate(value: string | null): string {
   }).format(new Date(value));
 }
 
+function toDateTimeInput(value: string | null): string {
+  if (!value) return "";
+  const date = new Date(value);
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+}
+
 export default function DatabasePage() {
   const [allowed, setAllowed] = useState<boolean | null>(null);
   const [reports, setReports] = useState<Report[]>([]);
@@ -40,6 +48,13 @@ export default function DatabasePage() {
   const [page, setPage] = useState(1);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingDescription, setEditingDescription] = useState("");
+  const [editingLocation, setEditingLocation] = useState("");
+  const [editingOccurredAt, setEditingOccurredAt] = useState("");
+  const [editingCategory, setEditingCategory] = useState("");
+  const [editingBrand, setEditingBrand] = useState("");
+  const [editingColor, setEditingColor] = useState("");
+  const [editingFeatures, setEditingFeatures] = useState("");
+  const [photoReport, setPhotoReport] = useState<Report | null>(null);
   const [kind, setKind] = useState<"lost" | "found">("found");
   const [description, setDescription] = useState("");
   const [location, setLocation] = useState("");
@@ -63,7 +78,7 @@ export default function DatabasePage() {
   }, []);
 
   useEffect(() => {
-    const isLocal = ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+    const isLocal = ["localhost", "127.0.0.1", "::1", "[::1]"].includes(window.location.hostname);
     setAllowed(isLocal);
     if (isLocal) void refresh();
   }, [refresh]);
@@ -148,6 +163,12 @@ export default function DatabasePage() {
   const startEdit = (report: Report) => {
     setEditingId(report.id);
     setEditingDescription(report.description);
+    setEditingLocation(report.location ?? "");
+    setEditingOccurredAt(toDateTimeInput(report.occurred_at));
+    setEditingCategory(report.category ?? "");
+    setEditingBrand(report.brand ?? "");
+    setEditingColor(report.color ?? "");
+    setEditingFeatures(report.distinctive_features.join("、"));
     setError("");
   };
 
@@ -157,11 +178,23 @@ export default function DatabasePage() {
     const response = await fetch("/api/database/reports/manage", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: reportId, description: editingDescription.trim() }),
+      body: JSON.stringify({
+        id: reportId,
+        description: editingDescription.trim(),
+        location: editingLocation.trim() || null,
+        occurred_at: editingOccurredAt ? new Date(editingOccurredAt).toISOString() : null,
+        category: editingCategory.trim() || null,
+        brand: editingBrand.trim() || null,
+        color: editingColor.trim() || null,
+        distinctive_features: editingFeatures
+          .split(/[、,，\n]/)
+          .map((value) => value.trim())
+          .filter(Boolean),
+      }),
     });
     if (response.ok) {
       setEditingId(null);
-      setNotice("描述已更新，AI 特徵與所有配對已重新計算。");
+      setNotice("案件資料與 AI 特徵已更新，文字向量及所有配對已重新計算。");
       await refresh();
     } else {
       setError("修改失敗"); setLoading(false);
@@ -261,20 +294,29 @@ export default function DatabasePage() {
               {!loading && visibleReports.length === 0 && <tr><td colSpan={6} className={styles.empty}>沒有符合條件的資料。</td></tr>}
               {pagedReports.map((report) => (
                 <tr key={report.id}>
-                  <td>{report.image_url ? <a href={`${API}${report.image_url}`} target="_blank" rel="noreferrer"><img className={styles.thumbnail} src={`${API}${report.image_url}`} alt="物品照片" /></a> : <span className={styles.noPhoto}>無照片</span>}</td>
+                  <td>{report.image_url ? <button className={styles.thumbnailButton} onClick={() => setPhotoReport(report)} aria-label="放大查看物品照片"><img className={styles.thumbnail} src={`/api/database/reports/manage?image=${report.id}`} alt="物品照片" /></button> : <span className={styles.noPhoto}>無照片</span>}</td>
                   <td>
                     <b className={report.kind === "found" ? styles.found : styles.lost}>{report.kind === "found" ? "拾獲" : "遺失"}</b>
-                    <b className={report.status === "returned" ? styles.returned : styles.open}>{report.status === "returned" ? "已認領" : report.status === "claim_pending" ? "認領審核中" : "待認領"}</b>
+                    <b className={report.status === "returned" ? styles.returned : styles.open}>{report.status === "returned" ? "已結案" : report.status === "claim_pending" ? "認領審核中" : report.kind === "lost" ? "持續協尋中" : "待認領"}</b>
                     <code title={report.id}>{report.id.slice(0, 8)}</code>
                   </td>
                   <td className={styles.description}>
                     {editingId === report.id ? <textarea value={editingDescription} onChange={(event) => setEditingDescription(event.target.value)} autoFocus /> : report.description}
                   </td>
                   <td className={styles.aiFeatures}>
-                    <strong>{[report.color, report.category].filter(Boolean).join(" · ") || "待辨識"}</strong>
-                    {report.distinctive_features.length > 0 && <span>{report.distinctive_features.join("、")}</span>}
+                    {editingId === report.id ? (
+                      <div className={styles.featureEditor}>
+                        <input value={editingCategory} onChange={(event) => setEditingCategory(event.target.value)} placeholder="類別，如 bottle" />
+                        <input value={editingColor} onChange={(event) => setEditingColor(event.target.value)} placeholder="顏色，如 black" />
+                        <input value={editingBrand} onChange={(event) => setEditingBrand(event.target.value)} placeholder="品牌（選填）" />
+                        <textarea value={editingFeatures} onChange={(event) => setEditingFeatures(event.target.value)} placeholder="特徵，以頓號或換行分隔" />
+                        <small>請填寫照片中能確認的客觀特徵；儲存後會重建向量與配對。</small>
+                      </div>
+                    ) : (
+                      <><strong>{[report.color, report.category].filter(Boolean).join(" · ") || "待辨識"}</strong>{report.brand && <span>品牌：{report.brand}</span>}{report.distinctive_features.length > 0 && <span>{report.distinctive_features.join("、")}</span>}</>
+                    )}
                   </td>
-                  <td><strong>{report.location || "未提供"}</strong><span>{formatDate(report.occurred_at || report.created_at)}</span></td>
+                  <td>{editingId === report.id ? <div className={styles.detailEditor}><input value={editingLocation} onChange={(event) => setEditingLocation(event.target.value)} placeholder="地點" /><input type="datetime-local" value={editingOccurredAt} onChange={(event) => setEditingOccurredAt(event.target.value)} /></div> : <><strong>{report.location || "未提供"}</strong><span>{formatDate(report.occurred_at || report.created_at)}</span></>}</td>
                   <td><div className={styles.rowActions}>
                     {editingId === report.id ? (
                       <><button className={styles.save} onClick={() => void saveDescription(report.id)} disabled={loading}>儲存</button><button className={styles.cancel} onClick={() => setEditingId(null)}>取消</button></>
@@ -295,6 +337,15 @@ export default function DatabasePage() {
           </nav>
         )}
       </section>
+      {photoReport && (
+        <div className={styles.photoBackdrop} onClick={() => setPhotoReport(null)}>
+          <section className={styles.photoModal} role="dialog" aria-modal="true" aria-label="物品照片預覽" onClick={(event) => event.stopPropagation()}>
+            <button className={styles.photoClose} onClick={() => setPhotoReport(null)} aria-label="關閉照片">×</button>
+            <img src={`/api/database/reports/manage?image=${photoReport.id}`} alt={photoReport.description} />
+            <p>{photoReport.description}</p>
+          </section>
+        </div>
+      )}
     </main>
   );
 }

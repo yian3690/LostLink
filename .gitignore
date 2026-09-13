@@ -9,6 +9,8 @@ __pycache__/
 .ruff_cache/
 htmlcov/
 .coverage
+.coverage.*
+coverage.xml
 
 # Local secrets and runtime data
 .env
@@ -18,6 +20,8 @@ htmlcov/
 uploads/
 .runtime/
 lostlink.db
+*.db
+*.db-journal
 *.sqlite
 *.sqlite3
 *.db-shm
@@ -27,7 +31,9 @@ lostlink.db
 # Next.js
 admin-web/node_modules/
 admin-web/.next/
+admin-web/out/
 admin-web/.env.local
+coverage/
 *.tsbuildinfo
 
 # Generated Windows launcher compatibility files

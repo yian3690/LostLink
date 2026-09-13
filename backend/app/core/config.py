@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     line_channel_secret: str = ""
     line_channel_access_token: str = ""
     line_liff_id: str = ""
+    line_login_channel_id: str = ""
 
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "gemma3:4b"

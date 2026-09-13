@@ -3,8 +3,11 @@ import { NextRequest } from "next/server";
 const backend = process.env.BACKEND_INTERNAL_URL ?? "http://127.0.0.1:8000";
 
 function isLocal(request: NextRequest): boolean {
-  const host = (request.headers.get("host") ?? "").split(":")[0].toLowerCase();
-  return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(host);
+  const hostHeader = (request.headers.get("host") ?? "").trim().toLowerCase();
+  const host = hostHeader.startsWith("[")
+    ? hostHeader.slice(1, hostHeader.indexOf("]"))
+    : hostHeader.split(":")[0];
+  return ["localhost", "127.0.0.1", "::1"].includes(host);
 }
 
 async function forward(request: NextRequest, method: "GET" | "POST") {

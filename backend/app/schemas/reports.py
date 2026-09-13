@@ -28,6 +28,23 @@ class ReportDescriptionUpdate(BaseModel):
     description: str = Field(min_length=1, max_length=2000)
 
 
+class OwnerReportUpdate(BaseModel):
+    description: str = Field(min_length=1, max_length=2000)
+    location: str | None = Field(default=None, max_length=240)
+    occurred_at: datetime | None = None
+
+
+class OwnerReportResolve(BaseModel):
+    found_report_id: str | None = Field(default=None, max_length=36)
+
+
+class ReportFeaturesUpdate(OwnerReportUpdate):
+    category: str | None = Field(default=None, max_length=80)
+    brand: str | None = Field(default=None, max_length=80)
+    color: str | None = Field(default=None, max_length=80)
+    distinctive_features: list[str] = Field(default_factory=list, max_length=30)
+
+
 class ReportStatusUpdate(BaseModel):
     status: Literal["open", "returned"]
 
@@ -66,6 +83,11 @@ class MatchRead(BaseModel):
 class ReportCreated(BaseModel):
     report: ReportRead
     matches: list[MatchRead] = Field(default_factory=list)
+
+
+class OwnerReportResolved(BaseModel):
+    lost_report: ReportRead
+    found_report: ReportRead | None = None
 
 
 class DashboardStats(BaseModel):

@@ -29,6 +29,10 @@
 .cardBody { padding: 13px; }
 .cardBody h3 { margin: 0 0 8px; font-size: 15px; }
 .cardBody p { margin-top: 4px; overflow: hidden; color: #68766e; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.myCaseButton { display: block; width: 100%; padding: 0; color: inherit; background: transparent; text-align: left; }
+.myCaseButton:hover { transform: translateY(-2px); }
+.myCaseButton:focus-visible { border-radius: 18px; outline: 3px solid rgba(8,167,90,.35); outline-offset: 3px; }
+.editHint { display: block; margin-top: 10px; color: #078e4d; font-size: 10px; font-weight: 850; }
 .empty { grid-column: 1 / -1; padding: 60px 20px; color: #718078; text-align: center; }
 .formPage { padding: 22px 0 40px; }
 .back { margin: 0 0 28px; padding: 0; color: #53635a; background: transparent; }
@@ -63,7 +67,7 @@
 .match p { color: #68766e; font-size: 11px; }
 .match ul { margin: 8px 0; padding-left: 17px; color: #42534a; font-size: 11px; }
 .match button { padding: 9px 13px; background: #10261d; font-size: 12px; }
-.nav { position: fixed; z-index: 30; right: 0; bottom: 0; left: 0; display: grid; grid-template-columns: repeat(3, 1fr); height: calc(70px + env(safe-area-inset-bottom)); padding: 7px max(8px, env(safe-area-inset-left)) env(safe-area-inset-bottom); border-top: 1px solid #dfe8e2; background: rgba(255,255,255,.96); backdrop-filter: blur(18px); }
+.nav { position: fixed; z-index: 30; right: 0; bottom: 0; left: 0; display: grid; grid-template-columns: repeat(4, 1fr); height: calc(70px + env(safe-area-inset-bottom)); padding: 7px max(8px, env(safe-area-inset-left)) env(safe-area-inset-bottom); border-top: 1px solid #dfe8e2; background: rgba(255,255,255,.96); backdrop-filter: blur(18px); }
 .nav button { display: grid; gap: 2px; place-items: center; padding: 5px; color: #758179; background: transparent; font-size: 10px; }
 .nav button b { font-size: 22px; line-height: 1; }
 .nav button.active { color: #08a75a; }
@@ -87,3 +91,46 @@
   .modalBackdrop { align-items: center; }
   .detailModal { border-radius: 24px; }
 }
+.claimModal { position: relative; width: min(100%, 500px); margin: 0 auto; padding: 28px 24px 24px; overflow: hidden; border: 1px solid rgba(255,255,255,.8); border-radius: 26px 26px 20px 20px; background: linear-gradient(180deg, #f4fff8 0, #fff 112px); box-shadow: 0 30px 90px rgba(3,35,23,.32); animation: claimEnter .22s ease-out; }
+.myEditModal { position: relative; width: min(100%, 540px); max-height: 90dvh; margin: 0 auto; padding: 28px 24px 24px; overflow: auto; border-radius: 26px 26px 20px 20px; background: linear-gradient(180deg, #f4fff8 0, #fff 112px); box-shadow: 0 30px 90px rgba(3,35,23,.32); }
+.myEditModal > small { color: #078e4d; font-size: 10px; font-weight: 900; letter-spacing: .14em; }
+.myEditModal h2 { margin: 7px 44px 8px 0; font-size: 27px; }
+.myEditModal > p { margin: 0 0 20px; color: #5f7067; font-size: 13px; line-height: 1.6; }
+.myEditModal form { display: grid; gap: 15px; }
+.myEditModal label { display: grid; gap: 7px; font-size: 13px; font-weight: 800; }
+.myEditModal input, .myEditModal textarea { width: 100%; border: 1px solid #d5e4da; border-radius: 13px; padding: 13px 14px; outline: none; color: #10261d; background: white; font: inherit; }
+.myEditModal textarea { min-height: 120px; resize: vertical; }
+.myEditModal input:focus, .myEditModal textarea:focus { border-color: #08a75a; box-shadow: 0 0 0 4px rgba(8,167,90,.11); }
+.resolveSection { margin-top: 22px; padding-top: 20px; border-top: 1px solid #dce8e0; }
+.resolveStart { width: 100%; min-height: 48px; border: 1px solid #bed8c8; border-radius: 14px; color: #087847; background: #effaf3; font-size: 14px; font-weight: 850; }
+.resolveSection h3 { margin: 0 0 6px; font-size: 17px; }
+.resolveSection > p { margin: 0 0 14px; color: #68766e; font-size: 12px; line-height: 1.55; }
+.resolveOptions { display: grid; gap: 8px; }
+.resolveOptions label { display: grid; grid-template-columns: 20px 1fr; align-items: center; gap: 10px; padding: 12px; border: 1px solid #dce8e0; border-radius: 13px; background: white; cursor: pointer; }
+.resolveOptions input { width: 17px; height: 17px; margin: 0; accent-color: #08a75a; }
+.resolveOptions span { display: grid; gap: 3px; }
+.resolveOptions b { font-size: 13px; }
+.resolveOptions small { color: #748179; font-size: 10px; font-weight: 600; }
+.resolveActions { display: grid; grid-template-columns: .8fr 1.5fr; gap: 9px; margin-top: 13px; }
+.resolveActions button { min-height: 46px; border-radius: 13px; font-size: 12px; font-weight: 850; }
+.resolveConfirm { color: white; background: #17605f; }
+.resolveActions button:disabled { cursor: wait; opacity: .55; }
+.claimModal::before { position: absolute; top: 0; right: 0; left: 0; height: 5px; content: ""; background: linear-gradient(90deg, #08a75a, #78dc75, #caff77); }
+.claimIcon { display: grid; width: 48px; height: 48px; margin-bottom: 18px; place-items: center; border-radius: 15px 15px 15px 5px; color: white; background: linear-gradient(145deg, #08a75a, #087847); box-shadow: 0 10px 24px rgba(8,167,90,.24); font-size: 22px; font-weight: 900; }
+.claimModal > small { color: #078e4d; font-size: 10px; font-weight: 900; letter-spacing: .14em; }
+.claimModal h2 { margin: 7px 44px 8px 0; color: #10261d; font-size: 26px; line-height: 1.2; letter-spacing: -.035em; }
+.claimModal > p { margin: 0 0 20px; color: #5f7067; font-size: 13px; line-height: 1.65; }
+.claimClose { position: absolute; top: 17px; right: 17px; display: grid; width: 36px; height: 36px; place-items: center; padding: 0; border: 1px solid #dce8e0; color: #607168; background: rgba(255,255,255,.84); font-size: 22px; line-height: 1; }
+.claimModal form { display: grid; gap: 9px; }
+.claimModal label { color: #1c382b; font-size: 13px; font-weight: 850; }
+.claimModal textarea { width: 100%; min-height: 122px; padding: 15px 16px; resize: vertical; border: 1px solid #d5e4da; border-radius: 15px; outline: none; color: #10261d; background: #fbfdfb; font: inherit; line-height: 1.55; transition: border-color .15s ease, box-shadow .15s ease, background .15s ease; }
+.claimModal textarea:focus { border-color: #08a75a; background: white; box-shadow: 0 0 0 4px rgba(8,167,90,.11); }
+.claimModal textarea::placeholder { color: #91a098; }
+.claimMeta { display: flex; min-height: 20px; align-items: start; justify-content: space-between; gap: 12px; color: #7a8880; font-size: 10px; line-height: 1.45; }
+.claimMeta b { flex: 0 0 auto; color: #98a49d; font-weight: 700; }
+.claimActions { display: grid; grid-template-columns: .8fr 1.4fr; gap: 10px; margin-top: 8px; }
+.claimActions button { min-height: 48px; border-radius: 14px; font-size: 13px; font-weight: 850; }
+.claimCancel { border: 1px solid #d9e5dd; color: #53635a; background: white; }
+.claimSubmit { color: white; background: linear-gradient(135deg, #087847, #08a75a); box-shadow: 0 10px 24px rgba(8,167,90,.2); }
+.claimActions button:disabled { cursor: wait; opacity: .58; transform: none; }
+@keyframes claimEnter { from { opacity: 0; transform: translateY(18px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }

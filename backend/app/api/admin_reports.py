@@ -1,13 +1,14 @@
 import hmac
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from fastapi.responses import FileResponse
 
 from app.api.reports import service_dependency, to_report_read
 from app.core.config import Settings, get_settings
 from app.schemas.reports import (
     ReportCreate,
     ReportCreated,
-    ReportDescriptionUpdate,
+    ReportFeaturesUpdate,
     ReportStatusUpdate,
     ReportRead,
     MatchRead,
@@ -41,6 +42,25 @@ async def admin_list_reports(
     return [to_report_read(item) for item in await service.list_reports(limit)]
 
 
+@router.get(
+    "/reports/{report_id}/image",
+    response_class=FileResponse,
+    dependencies=[Depends(require_database_admin)],
+)
+async def admin_report_image(
+    report_id: str,
+    service: ReportService = Depends(service_dependency),
+) -> FileResponse:
+    thumbnail = await service.protected_thumbnail(report_id)
+    if not thumbnail:
+        raise HTTPException(404, "Report thumbnail not found")
+    return FileResponse(
+        thumbnail,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=300"},
+    )
+
+
 @router.post(
     "/reports",
     response_model=ReportCreated,
@@ -67,10 +87,10 @@ async def admin_create_report(
 )
 async def admin_update_report(
     report_id: str,
-    payload: ReportDescriptionUpdate,
+    payload: ReportFeaturesUpdate,
     service: ReportService = Depends(service_dependency),
 ) -> ReportCreated:
-    result = await service.replace_description(report_id, payload.description)
+    result = await service.replace_admin_details(report_id, payload)
     if not result:
         raise HTTPException(404, "Report not found")
     report, matches = result

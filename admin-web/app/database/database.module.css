@@ -44,9 +44,20 @@
 .open { color: #765d0a; background: #fff3ae; }
 .returned { color: #17605f; background: #dff5f2; }
 .thumbnail { width: 78px; height: 62px; border-radius: 9px; object-fit: cover; box-shadow: 0 3px 10px rgba(16,38,29,.12); }
+.thumbnailButton { display: block; padding: 0; border: 0; background: transparent; cursor: zoom-in; }
+.thumbnailButton:hover { transform: scale(1.04); }
 .noPhoto { color: #8b9790 !important; font-size: 11px !important; }
 .description { width: 38%; min-width: 300px; font-weight: 650; line-height: 1.55; }
 .description textarea { min-height: 82px; resize: vertical; }
+.featureEditor, .detailEditor { display: grid; gap: 7px; min-width: 190px; }
+.featureEditor input, .featureEditor textarea, .detailEditor input { width: 100%; border: 1px solid #d9e4dd; border-radius: 9px; padding: 8px 9px; outline: none; color: #14231c; background: white; font: inherit; font-size: 11px; }
+.featureEditor textarea { min-height: 66px; resize: vertical; }
+.featureEditor small { color: #8a5d17; font-size: 10px; line-height: 1.45; }
+.photoBackdrop { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; padding: 28px; background: rgba(5,24,17,.74); backdrop-filter: blur(8px); }
+.photoModal { position: relative; display: grid; width: min(92vw, 820px); max-height: 90vh; overflow: auto; border-radius: 22px; padding: 18px; background: white; box-shadow: 0 30px 100px rgba(0,0,0,.38); }
+.photoModal img { display: block; width: 100%; max-height: 72vh; border-radius: 14px; object-fit: contain; background: #edf2ef; }
+.photoModal p { margin: 14px 38px 2px 2px; color: #405148; line-height: 1.6; }
+.photoClose { position: absolute; z-index: 2; top: 27px; right: 27px; display: grid; width: 40px; height: 40px; place-items: center; padding: 0; border-radius: 50%; color: white; background: rgba(8,36,25,.78); font-size: 24px; }
 .rowActions { display: flex; flex-wrap: wrap; gap: 7px; min-width: 150px; }
 .rowActions button { padding: 8px 10px; border-radius: 9px; font-size: 11px; white-space: nowrap; }
 .edit, .cancel { color: #26372f; border: 1px solid #d8e3dc; background: white; }

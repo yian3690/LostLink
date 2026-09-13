@@ -17,6 +17,32 @@ $ngrokExecutable = $null
 $publicUrl = $null
 $ollamaCommand = Get-Command ollama -ErrorAction SilentlyContinue
 
+function Test-ServiceUrl([string]$Url) {
+    try {
+        $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 3
+        return $response.StatusCode -lt 500
+    } catch { return $false }
+}
+
+$existingPublicUrlFile = Join-Path $runtimeDir "public-url.txt"
+$existingPublicUrl = if (Test-Path -LiteralPath $existingPublicUrlFile) {
+    (Get-Content -Raw -LiteralPath $existingPublicUrlFile).Trim()
+} else { $null }
+$backendAlreadyReady = Test-ServiceUrl "http://127.0.0.1:8000/health"
+$frontendAlreadyReady = Test-ServiceUrl "http://127.0.0.1:3000/mobile"
+$tunnelRequired = Test-Path -LiteralPath $ngrokConfig
+$tunnelAlreadyReady = -not $tunnelRequired -or ($existingPublicUrl -and (Test-ServiceUrl "$existingPublicUrl/health"))
+if ($backendAlreadyReady -and $frontendAlreadyReady -and $tunnelAlreadyReady) {
+    Write-Host "LostLink AI 已在執行，這次不會重複啟動。" -ForegroundColor Green
+    $openUrl = if ($existingPublicUrl) { "$existingPublicUrl/mobile" } else { "http://127.0.0.1:3000/mobile" }
+    Write-Host "網頁：$openUrl" -ForegroundColor Cyan
+    if (-not $NoBrowser) { Start-Process $openUrl }
+    exit 0
+}
+
+# 清理由先前異常中斷留下的本專案程序，避免連接埠與 .next 快取衝突。
+& (Join-Path $PSScriptRoot "stop_all.ps1") -Quiet
+
 if (-not (Test-Path -LiteralPath $pythonPath)) {
     throw "找不到 .venv，請先安裝 Python 3.12 並建立虛擬環境。"
 }
@@ -86,7 +112,15 @@ if (Test-Path -LiteralPath $nextCache) {
     }
     Remove-Item -LiteralPath $resolvedCache -Recurse -Force
 }
-$frontend = Start-Process -FilePath $nodePath -ArgumentList @("`"$nextCli`"", "dev", "-H", "0.0.0.0", "-p", "3000") -WorkingDirectory $adminDir -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $runtimeDir "frontend.log") -RedirectStandardError (Join-Path $runtimeDir "frontend-error.log")
+Write-Host "正在建立正式版手機網頁..." -ForegroundColor Cyan
+Push-Location $adminDir
+try {
+    & $nodePath $nextCli "build"
+    if ($LASTEXITCODE -ne 0) { throw "Next.js 正式版建置失敗。" }
+} finally {
+    Pop-Location
+}
+$frontend = Start-Process -FilePath $nodePath -ArgumentList @("`"$nextCli`"", "start", "-H", "0.0.0.0", "-p", "3000") -WorkingDirectory $adminDir -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $runtimeDir "frontend.log") -RedirectStandardError (Join-Path $runtimeDir "frontend-error.log")
 
 function Wait-Service([string]$Url, [Diagnostics.Process]$Process, [string]$Name) {
     for ($attempt = 0; $attempt -lt 180; $attempt++) {
@@ -173,9 +207,9 @@ if ($publicUrl) {
     Write-Host "LINE Webhook：${publicUrl}/webhooks/line"
     Write-Host "LIFF Endpoint：${publicUrl}/mobile"
 } else {
-    Write-Host "公開 HTTPS：尚未設定（雙擊「設定 ngrok.cmd」即可啟用）" -ForegroundColor Yellow
+    Write-Host "公開 HTTPS：尚未設定（雙擊「Setup ngrok.cmd」即可啟用）" -ForegroundColor Yellow
 }
-Write-Host "停止：雙擊「停止 LostLink AI.cmd」"
+Write-Host "停止：雙擊「Stop LostLink.bat」"
 
 if (-not $NoBrowser) {
     if ($publicUrl) { Start-Process "${publicUrl}/mobile" }

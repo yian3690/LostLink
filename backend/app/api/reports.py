@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,11 +10,15 @@ from app.core.database import get_session
 from app.schemas.reports import (
     DashboardStats,
     MatchRead,
+    OwnerReportResolve,
+    OwnerReportResolved,
+    OwnerReportUpdate,
     ReportCreate,
     ReportCreated,
     ReportRead,
 )
 from app.services.reports import ReportService
+from app.services.line import LineClient
 
 
 router = APIRouter(prefix="/api/v1", tags=["reports"])
@@ -61,6 +65,31 @@ async def list_reports(
     return [to_report_read(report) for report in reports]
 
 
+async def verified_line_user(
+    authorization: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+) -> str:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(401, "LINE access token is required")
+    line_user_id = await LineClient(settings).verify_access_token(
+        authorization.split(" ", 1)[1].strip()
+    )
+    if not line_user_id:
+        raise HTTPException(401, "Invalid LINE access token")
+    return line_user_id
+
+
+@router.get("/reports/mine", response_model=list[ReportRead])
+async def list_my_reports(
+    limit: int = Query(50, ge=1, le=100),
+    kind: Literal["lost", "found"] | None = Query(default="lost"),
+    line_user_id: str = Depends(verified_line_user),
+    service: ReportService = Depends(service_dependency),
+) -> list[ReportRead]:
+    reports = await service.list_user_reports(line_user_id, limit, kind)
+    return [to_report_read(report) for report in reports]
+
+
 @router.get("/reports/{report_id}/image", response_class=FileResponse)
 async def public_report_image(
     report_id: str,
@@ -73,6 +102,61 @@ async def public_report_image(
         thumbnail,
         media_type="image/jpeg",
         headers={"Cache-Control": "private, max-age=300"},
+    )
+
+
+@router.get("/reports/{report_id}/owner-image", response_class=FileResponse)
+async def owner_report_image(
+    report_id: str,
+    line_user_id: str = Depends(verified_line_user),
+    service: ReportService = Depends(service_dependency),
+) -> FileResponse:
+    thumbnail = await service.owner_thumbnail(report_id, line_user_id)
+    if not thumbnail:
+        raise HTTPException(404, "Owner thumbnail not found")
+    return FileResponse(
+        thumbnail,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=300"},
+    )
+
+
+@router.patch("/reports/{report_id}/mine", response_model=ReportCreated)
+async def update_my_report(
+    report_id: str,
+    payload: OwnerReportUpdate,
+    line_user_id: str = Depends(verified_line_user),
+    service: ReportService = Depends(service_dependency),
+) -> ReportCreated:
+    result = await service.update_owned_report(report_id, line_user_id, payload)
+    if not result:
+        raise HTTPException(404, "Owned lost report not found")
+    report, matches = result
+    return ReportCreated(
+        report=to_report_read(report),
+        matches=[MatchRead.model_validate(match) for match in matches],
+    )
+
+
+@router.post("/reports/{report_id}/mine/resolve", response_model=OwnerReportResolved)
+async def resolve_my_report(
+    report_id: str,
+    payload: OwnerReportResolve,
+    line_user_id: str = Depends(verified_line_user),
+    service: ReportService = Depends(service_dependency),
+) -> OwnerReportResolved:
+    try:
+        result = await service.resolve_owned_report(
+            report_id, line_user_id, payload.found_report_id
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not result:
+        raise HTTPException(404, "Owned lost report not found")
+    lost, found = result
+    return OwnerReportResolved(
+        lost_report=to_report_read(lost),
+        found_report=to_report_read(found) if found else None,
     )
 
 

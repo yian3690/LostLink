@@ -12,6 +12,8 @@ LostLink AI 是一套以 LINE 為入口的多模態 AI 校園失物招領服務�
 - 候選物品相似度排序與可解釋配對
 - 高可信候選的 LINE 主動通知
 - 安全認領流程、校方管理後台與成效指標
+- 使用者可查看、修改與結束自己的持續協尋案件
+- 管理員可人工修正 AI 特徵，並重新建立向量與候選配對
 
 ## 系統架構
 
@@ -101,7 +103,7 @@ sequenceDiagram
     participant DB as PostgreSQL + pgvector
     participant Notify as 通知服務
 
-    Finder->>Line: 上傳黑色無線耳機照片
+    Finder->>Line: 這是我剛撿到的 + 上傳黑色無線耳機照片
     Line->>API: 圖片訊息 ID
     API->>Line: 下載原始圖片
     API->>AI: 圖片理解與 Embedding
@@ -114,6 +116,8 @@ sequenceDiagram
 ```
 
 照片會由 Gemma 3 產生可讀的物品屬性與特色描述，也會直接交給 SigLIP 2 產生圖像向量，避免文字描述遺漏保護殼、外型或局部特徵。
+
+若使用者只傳照片、沒有說明用途，LINE 會先詢問這是「撿到的物品」、「遺失物的舊照」或其他用途，不會直接建立案件。拾獲登記完成後只比對仍在協尋的遺失案件，不會把剛建立的拾獲紀錄或其他遺失登記誤當成候選回傳。
 
 ### 3. 多訊號配對
 
@@ -152,6 +156,13 @@ flowchart TD
 3. 認領者提供未公開特徵，例如刻字、刮痕、保護殼內側或配件。
 4. 校方在後台核對，通過後安排領回。
 5. 案件依序更新為 `matched`、`claim_pending`、`returned` 並保留稽核紀錄。
+
+### 5. 持續協尋管理與結案
+
+1. 建立持續協尋時，系統會收集照片或文字描述，並追問尚未提供的遺失地點與大約時間。
+2. 使用者可在手機版「我的持續協尋」查看自己的案件，點入後修改描述、地點及時間；儲存時會同步更新資料庫、AI 特徵、向量與候選配對。
+3. 找回物品後可按「我已找到物品」結案。若選擇某筆待認領拾獲物，遺失與拾獲案件會一起改為已結案／已認領；若是在其他地方自行找到，只停止該筆持續協尋，不會更動其他待認領物品。
+4. 校方管理頁可放大查看照片，並人工修改類別、品牌、顏色與客觀特徵。每次儲存都會重新建立文字向量及配對，因此應只填入照片或實物可確認的資訊，避免主觀或猜測性的特徵降低準確度。
 
 ## 核心資料模型
 
@@ -200,16 +211,25 @@ LostLink AI/
 
 ### Windows 一鍵啟動（建議）
 
-直接雙擊專案根目錄的 **`啟動 LostLink.bat`**。系統會自動檢查環境，啟動 Ollama、FastAPI、SQLite、Next.js 與已設定的 ngrok，等待服務就緒後開啟手機版頁面。首次執行時也會自動安裝缺少的前端套件。
+直接雙擊專案根目錄的 **`Start LostLink.bat`**。系統會自動檢查環境，啟動 Ollama、FastAPI、SQLite、Next.js 與已設定的 ngrok，等待服務就緒後開啟手機版頁面。首次執行時也會自動安裝缺少的前端套件。
 
-啟動視窗會顯示同一 Wi-Fi 手機網址；若已設定 ngrok，也會顯示評審可從外網開啟的 HTTPS、Webhook 與 LIFF Endpoint。使用完畢後雙擊 **`關閉 LostLink.bat`**。原有的 **`啟動 LostLink AI.cmd`**／**`停止 LostLink AI.cmd`** 仍可使用；新版 BAT 額外處理 Windows PowerShell 5.1 的 UTF-8 相容問題。
+啟動視窗會顯示同一 Wi-Fi 手機網址；若已設定 ngrok，也會顯示評審可從外網開啟的 HTTPS、Webhook 與 LIFF Endpoint。重複雙擊 **`Start LostLink.bat`** 時只會開啟既有網頁，不會重複建立服務。使用完畢後雙擊 **`Stop LostLink.bat`**，系統會完整關閉後端、前端與 ngrok。
 
 本機使用 `lostlink.db`；啟動後端時資料庫會自動開啟，不需要另外啟動資料庫程式。執行紀錄、管理金鑰、ngrok token 與固定網域設定都位於 Git 已忽略的 `.runtime/`。
+
+| Windows 檔案 | 用途 |
+|---|---|
+| `Start LostLink.bat` | 一鍵啟動全部服務並開啟手機版頁面 |
+| `Stop LostLink.bat` | 關閉後端、前端與 ngrok |
+| `Open Database Admin.cmd` | 開啟校方資料庫管理頁 |
+| `Setup ngrok.cmd` | 首次設定 ngrok Authtoken 與固定網域 |
+| `Show LostLink Public URL.cmd` | 顯示目前公開網址、LIFF Endpoint 與 Webhook URL |
+| `Setup LINE Messaging API.cmd` | 寫入本機 LINE Channel Secret、Access Token 與 LIFF ID |
 
 ### 免費 ngrok HTTPS（只需設定一次）
 
 1. 登入 ngrok Dashboard，進入 **Your Authtoken** 並複製 Authtoken。
-2. 雙擊 **`設定 ngrok.cmd`**，在本機視窗貼上；輸入不會顯示，也不需要傳給其他人。
+2. 雙擊 **`Setup ngrok.cmd`**，在本機視窗貼上；輸入不會顯示，也不需要傳給其他人。
 3. 在 ngrok Dashboard 的 **Domains** 找到帳號的固定開發網域，將純網域名稱寫入 `.runtime/ngrok-domain.txt`：
 
    ```powershell
@@ -217,8 +237,8 @@ LostLink AI/
    Set-Content .runtime/ngrok-domain.txt "你的固定網域.ngrok-free.dev"
    ```
 
-4. 雙擊 **`啟動 LostLink.bat`**。啟動視窗會列出三個可直接使用的網址。
-5. 之後可雙擊 **`查看 LostLink AI 公開網址.cmd`** 再次查看。
+4. 雙擊 **`Start LostLink.bat`**。啟動視窗會列出三個可直接使用的網址。
+5. 之後可雙擊 **`Show LostLink Public URL.cmd`** 再次查看。
 
 一鍵啟動會把 `https://該網域/mobile` 提供給 LIFF，並把 `https://該網域/webhooks/line` 提供給 Messaging API。電腦必須保持開機且程式持續執行，公開網址才有服務。
 
@@ -227,7 +247,7 @@ LostLink AI/
 專案已內建四筆含照片與正式向量的拾獲物：瓶裝茶、黑色無線耳機、藍色折疊傘、黑色保溫瓶。照片位於 `demo-assets/`。需要在新資料庫重新建立時執行：
 
 ```powershell
-..venvScriptspython.exe backendscriptsseed_demo_data.py
+.\.venv\Scripts\python.exe backend\scripts\seed_demo_data.py
 ```
 
 腳本可重複執行，已存在的資料會略過，而且建立資料時不會發送 LINE Push。建議依序在 LINE 測試：
@@ -329,7 +349,7 @@ NEXT_PUBLIC_LIFF_ID=你的-LIFF-ID
 
 未設定 LIFF ID 時，`/mobile` 會以一般瀏覽器 Demo 模式運作，方便先在電腦或手機測試介面。
 
-LINE Login Channel 在 `Developing` 狀態時只有 Admin／Tester 能登入；要讓一般帳號使用必須切換為 `Published`。發布不收取 LINE Login 費用，但狀態不能切回 `Developing`。暫停服務時只需雙擊 **`關閉 LostLink.bat`**；Channel 仍維持 Published，外部網址會暫時無法連線。
+LINE Login Channel 在 `Developing` 狀態時只有 Admin／Tester 能登入；要讓一般帳號使用必須切換為 `Published`。發布不收取 LINE Login 費用，但狀態不能切回 `Developing`。暫停服務時只需雙擊 **`Stop LostLink.bat`**；Channel 仍維持 Published，外部網址會暫時無法連線。
 
 目前正式測試使用的固定路徑格式如下：
 
@@ -345,11 +365,17 @@ Webhook URL:   https://你的固定網域/webhooks/line
 | `GET` | `/health` | 健康檢查 |
 | `POST` | `/api/v1/reports` | 建立遺失／拾獲案件 |
 | `GET` | `/api/v1/reports` | 查詢最新案件 |
+| `GET` | `/api/v1/reports/mine` | 查詢目前 LINE 使用者建立的案件 |
 | `GET` | `/api/v1/reports/{id}/image` | 取得待認領拾獲物的去 metadata 安全縮圖 |
+| `GET` | `/api/v1/reports/{id}/owner-image` | 由案件建立者取得自己的安全縮圖 |
+| `PATCH` | `/api/v1/reports/{id}/mine` | 修改自己的持續協尋描述、地點與時間並重新配對 |
+| `POST` | `/api/v1/reports/{id}/mine/resolve` | 將自己的協尋標記為已找到；可一併結束相符拾獲案件 |
 | `GET` | `/api/v1/reports/{id}/matches` | 查詢候選配對 |
 | `POST` | `/api/v1/matches/{id}/claims` | 提交私密特徵進行認領 |
 | `POST` | `/api/v1/claims/{id}/review` | 校方批准／拒絕認領 |
 | `GET` | `/api/v1/dashboard/stats` | 管理後台指標 |
+| `PATCH` | `/api/v1/admin/reports/{id}` | 管理員修改描述及 AI 特徵並重新建立向量與配對 |
+| `PATCH` | `/api/v1/admin/reports/{id}/status` | 管理員更新待認領／已領取狀態 |
 | `POST` | `/api/v1/demo/seed` | 建立示範資料 |
 | `POST` | `/webhooks/line` | LINE Messaging API Webhook |
 
@@ -364,7 +390,7 @@ npm audit --audit-level=high
 
 ## Push 到 GitHub 前
 
-`.env`、`.runtime/`、`lostlink.db`、`uploads/`、模型權重、Next.js 建置快取與 TypeScript 增量編譯檔都不應提交。推送前建議執行：
+`.env`、`.env.local`、`.runtime/`、SQLite 資料庫、`uploads/`、模型權重、測試覆蓋率、Next.js 建置／匯出產物與 TypeScript 增量編譯檔都不應提交。推送前建議執行：
 
 ```powershell
 git status --short
@@ -385,5 +411,7 @@ git diff --cached --check
 - [x] 建立管理後台、Demo 資料與自動測試
 - [x] 建立手機版 LIFF／PWA、相機上傳、拾獲物瀏覽與圖文協尋
 - [x] 圖片重新編碼去除 metadata，公開介面只提供縮圖
+- [x] 支援照片用途確認、持續協尋查看／修改／結案與拾獲物連動認領
+- [x] 支援管理員放大照片、人工修正 AI 特徵及重新建立向量與配對
 - [ ] 建立評估集並校準配對信心分數
 - [ ] 使用正式 LINE 帳號與本機 Gemma 3 完成完整展示驗收

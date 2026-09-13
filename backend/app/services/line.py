@@ -87,6 +87,51 @@ class LineClient:
             response.raise_for_status()
             return response.content
 
+    async def verify_id_token(self, id_token: str) -> str | None:
+        channel_id = self.settings.line_login_channel_id or (
+            self.settings.line_liff_id.split("-", 1)[0]
+            if self.settings.line_liff_id
+            else ""
+        )
+        if not channel_id:
+            return None
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(
+                "https://api.line.me/oauth2/v2.1/verify",
+                data={"id_token": id_token, "client_id": channel_id},
+            )
+        if response.status_code != 200:
+            return None
+        subject = response.json().get("sub")
+        return subject if isinstance(subject, str) and subject else None
+
+    async def verify_access_token(self, access_token: str) -> str | None:
+        channel_id = self.settings.line_login_channel_id or (
+            self.settings.line_liff_id.split("-", 1)[0]
+            if self.settings.line_liff_id
+            else ""
+        )
+        if not channel_id:
+            return None
+        async with httpx.AsyncClient(timeout=15) as client:
+            verification = await client.get(
+                "https://api.line.me/oauth2/v2.1/verify",
+                params={"access_token": access_token},
+            )
+            if verification.status_code != 200:
+                return None
+            details = verification.json()
+            if details.get("client_id") != channel_id or details.get("expires_in", 0) <= 0:
+                return None
+            profile = await client.get(
+                "https://api.line.me/v2/profile",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+        if profile.status_code != 200:
+            return None
+        user_id = profile.json().get("userId")
+        return user_id if isinstance(user_id, str) and user_id else None
+
 
 def build_match_reply(
     report_id: str, kind: str, matches: Sequence[Any], has_image: bool = True
@@ -245,6 +290,8 @@ def extract_time_hint(
         r"(?:(\d{4})\s*[年/.-]\s*)?(\d{1,2})\s*[月/.-]\s*(\d{1,2})\s*日?",
         text,
     )
+    clock = re.search(r"(\d{1,2})\s*(?:點|時)(?:(\d{1,2})\s*分)?", text)
+    period_labels = ("凌晨", "早上", "上午", "中午", "下午", "傍晚", "晚上", "晚間")
     day_offset: int | None = None
     if any(term in text for term in ("前天", "前日")):
         day_offset = -2
@@ -264,10 +311,13 @@ def extract_time_hint(
     elif day_offset is not None:
         target = current + timedelta(days=day_offset)
         base = datetime(target.year, target.month, target.day, tzinfo=taipei_timezone)
+    elif clock or any(label in text for label in period_labels):
+        # In an active report conversation, a standalone clock such as
+        # "早上 10 點左右" naturally refers to today.
+        base = datetime(current.year, current.month, current.day, tzinfo=taipei_timezone)
     else:
         return None
 
-    clock = re.search(r"(\d{1,2})\s*(?:點|時)(?:(\d{1,2})\s*分)?", text)
     if clock:
         hour = int(clock.group(1))
         minute = int(clock.group(2) or 0)
@@ -278,7 +328,8 @@ def extract_time_hint(
             hour = 0
         if hour > 23 or minute > 59:
             return None
-        return base.replace(hour=hour, minute=minute), 1.0
+        uncertainty = 2.0 if any(term in text for term in ("左右", "大概", "約", "多")) else 1.0
+        return base.replace(hour=hour, minute=minute), uncertainty
 
     periods = (
         (("凌晨",), 3, 3.0),

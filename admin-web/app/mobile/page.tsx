@@ -3,7 +3,7 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import styles from "./mobile.module.css";
 
-type Tab = "items" | "found" | "lost";
+type Tab = "items" | "found" | "lost" | "mine";
 
 type Report = {
   id: string;
@@ -23,6 +23,7 @@ type Report = {
 
 type Match = {
   id: string;
+  lost_report_id: string;
   found_report_id: string;
   score: number;
   decision: string;
@@ -32,6 +33,11 @@ type Match = {
 type ReportCreated = {
   report: Report;
   matches: Match[];
+};
+
+type OwnerReportResolved = {
+  lost_report: Report;
+  found_report: Report | null;
 };
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "";
@@ -50,6 +56,37 @@ function formatTime(value: string | null): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(value));
+}
+
+function toDateTimeInput(value: string | null): string {
+  if (!value) return "";
+  const date = new Date(value);
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+}
+
+function PrivateReportImage({ reportId, accessToken }: { reportId: string; accessToken: string }) {
+  const [source, setSource] = useState("");
+
+  useEffect(() => {
+    let objectUrl = "";
+    const controller = new AbortController();
+    void fetch(`${API}/api/v1/reports/${reportId}/owner-image`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: controller.signal,
+      cache: "no-store",
+    }).then(async (response) => {
+      if (!response.ok) return;
+      objectUrl = URL.createObjectURL(await response.blob());
+      setSource(objectUrl);
+    }).catch(() => undefined);
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [accessToken, reportId]);
+
+  return source ? <img src={source} alt="我的遺失物照片" /> : <span>載入照片中…</span>;
 }
 
 async function compressImage(file: File): Promise<{ base64: string; preview: string }> {
@@ -80,14 +117,29 @@ async function compressImage(file: File): Promise<{ base64: string; preview: str
 export default function MobilePage() {
   const [tab, setTab] = useState<Tab>("items");
   const [reports, setReports] = useState<Report[]>([]);
+  const [myReports, setMyReports] = useState<Report[]>([]);
   const [matches, setMatches] = useState<Match[]>([]);
   const [searchPerformed, setSearchPerformed] = useState(false);
   const [lineUserId, setLineUserId] = useState("web-guest");
+  const [lineAccessToken, setLineAccessToken] = useState("");
   const [displayName, setDisplayName] = useState("同學");
   const [loading, setLoading] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [selectedReport, setSelectedReport] = useState<Report | null>(null);
+  const [claimingMatch, setClaimingMatch] = useState<Match | null>(null);
+  const [claimEvidence, setClaimEvidence] = useState("");
+  const [claimError, setClaimError] = useState("");
+  const [claimSubmitting, setClaimSubmitting] = useState(false);
+  const [editingMyReport, setEditingMyReport] = useState<Report | null>(null);
+  const [myEditDescription, setMyEditDescription] = useState("");
+  const [myEditLocation, setMyEditLocation] = useState("");
+  const [myEditTime, setMyEditTime] = useState("");
+  const [myEditSaving, setMyEditSaving] = useState(false);
+  const [myReportMatches, setMyReportMatches] = useState<Match[]>([]);
+  const [showResolvePanel, setShowResolvePanel] = useState(false);
+  const [resolveChoice, setResolveChoice] = useState("");
+  const [myResolving, setMyResolving] = useState(false);
 
   const [foundDescription, setFoundDescription] = useState("");
   const [foundLocation, setFoundLocation] = useState("");
@@ -113,6 +165,20 @@ export default function MobilePage() {
     }
   }, []);
 
+  const loadMyReports = useCallback(async (accessToken: string) => {
+    if (!accessToken) return;
+    try {
+      const response = await fetch(`${API}/api/v1/reports/mine?kind=lost&limit=100`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error("目前無法讀取你的協尋案件");
+      setMyReports(await response.json());
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "讀取協尋案件失敗");
+    }
+  }, []);
+
   useEffect(() => {
     void loadReports();
     if (!LIFF_ID) return;
@@ -128,16 +194,30 @@ export default function MobilePage() {
         return;
       }
       const profile = await liff.getProfile();
+      const accessToken = liff.getAccessToken() ?? "";
       setLineUserId(profile.userId);
       setDisplayName(profile.displayName);
+      setLineAccessToken(accessToken);
+      if (accessToken) void loadMyReports(accessToken);
     }).catch(() => setError("LINE 登入初始化失敗，仍可使用網頁 Demo。"));
-  }, [loadReports]);
+  }, [loadMyReports, loadReports]);
 
   useEffect(() => {
-    if (!selectedReport) return;
+    if (!selectedReport && !claimingMatch && !editingMyReport) return;
     const previousOverflow = document.body.style.overflow;
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setSelectedReport(null);
+      if (event.key !== "Escape") return;
+      if (selectedReport) setSelectedReport(null);
+      if (claimingMatch && !claimSubmitting) {
+        setClaimingMatch(null);
+        setClaimEvidence("");
+        setClaimError("");
+      }
+      if (editingMyReport && !myEditSaving && !myResolving) {
+        setEditingMyReport(null);
+        setShowResolvePanel(false);
+        setResolveChoice("");
+      }
     };
     document.body.style.overflow = "hidden";
     window.addEventListener("keydown", closeOnEscape);
@@ -145,7 +225,7 @@ export default function MobilePage() {
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", closeOnEscape);
     };
-  }, [selectedReport]);
+  }, [claimSubmitting, claimingMatch, editingMyReport, myEditSaving, myResolving, selectedReport]);
 
   const matchedItems = useMemo(
     () =>
@@ -261,6 +341,7 @@ export default function MobilePage() {
           : "目前沒有高相似候選，系統會在新物品登記後繼續比對。",
       );
       await loadReports();
+      if (lineAccessToken) await loadMyReports(lineAccessToken);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "搜尋失敗");
     } finally {
@@ -281,18 +362,135 @@ export default function MobilePage() {
     );
   };
 
-  const claim = async (match: Match) => {
-    const evidence = window.prompt("請輸入只有失主知道的特徵（不會公開）");
-    if (!evidence || evidence.trim().length < 3) return;
-    const response = await fetch(`${API}/api/v1/matches/${match.id}/claims`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ line_user_id: lineUserId, private_evidence: evidence }),
-    });
-    if (response.ok) {
+  const openClaim = (match: Match) => {
+    setClaimingMatch(match);
+    setClaimEvidence("");
+    setClaimError("");
+  };
+
+  const closeClaim = () => {
+    if (claimSubmitting) return;
+    setClaimingMatch(null);
+    setClaimEvidence("");
+    setClaimError("");
+  };
+
+  const claim = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!claimingMatch) return;
+    const evidence = claimEvidence.trim();
+    if (evidence.length < 3) {
+      setClaimError("請至少輸入 3 個字，讓校方能核對物品。");
+      return;
+    }
+    setClaimSubmitting(true);
+    setClaimError("");
+    try {
+      const response = await fetch(`${API}/api/v1/matches/${claimingMatch.id}/claims`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ line_user_id: lineUserId, private_evidence: evidence }),
+      });
+      if (!response.ok) throw new Error("認領申請無法送出，可能已有申請正在審核。");
+      setClaimingMatch(null);
+      setClaimEvidence("");
       setNotice("認領申請已送出，請等待校方核對。");
-    } else {
-      setError("認領申請無法送出，可能已有申請正在審核。");
+    } catch (reason) {
+      setClaimError(reason instanceof Error ? reason.message : "認領申請無法送出，請稍後再試。");
+    } finally {
+      setClaimSubmitting(false);
+    }
+  };
+
+  const openMyReportEditor = async (report: Report) => {
+    setEditingMyReport(report);
+    setMyEditDescription(report.description);
+    setMyEditLocation(report.location ?? "");
+    setMyEditTime(toDateTimeInput(report.occurred_at));
+    setMyReportMatches([]);
+    setShowResolvePanel(false);
+    setResolveChoice("");
+    setError("");
+    if (report.status === "returned") return;
+    try {
+      const response = await fetch(`${API}/api/v1/reports/${report.id}/matches`, {
+        cache: "no-store",
+      });
+      if (response.ok) setMyReportMatches(await response.json());
+    } catch {
+      // Editing remains available even if candidate loading temporarily fails.
+    }
+  };
+
+  const saveMyReport = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!editingMyReport || !lineAccessToken) return;
+    if (!myEditDescription.trim()) {
+      setError("物品描述不可留空");
+      return;
+    }
+    setMyEditSaving(true);
+    try {
+      const response = await fetch(`${API}/api/v1/reports/${editingMyReport.id}/mine`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${lineAccessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          description: myEditDescription.trim(),
+          location: myEditLocation.trim() || null,
+          occurred_at: myEditTime ? new Date(myEditTime).toISOString() : null,
+        }),
+      });
+      if (!response.ok) throw new Error("案件更新失敗，請重新從 LINE 開啟後再試");
+      const result: ReportCreated = await response.json();
+      setMyReports((items) => items.map((item) => item.id === result.report.id ? result.report : item));
+      setEditingMyReport(null);
+      setNotice("協尋資料已更新，AI 特徵與候選配對也已重新計算。");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "案件更新失敗");
+    } finally {
+      setMyEditSaving(false);
+    }
+  };
+
+  const resolveMyReport = async () => {
+    if (!editingMyReport || !lineAccessToken || !resolveChoice) return;
+    setMyResolving(true);
+    setError("");
+    try {
+      const response = await fetch(`${API}/api/v1/reports/${editingMyReport.id}/mine/resolve`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${lineAccessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          found_report_id: resolveChoice === "self" ? null : resolveChoice,
+        }),
+      });
+      if (!response.ok) throw new Error("案件結案失敗，請重新整理後再試");
+      const result: OwnerReportResolved = await response.json();
+      setMyReports((items) => items.map((item) => (
+        item.id === result.lost_report.id ? result.lost_report : item
+      )));
+      if (result.found_report) {
+        setReports((items) => items.map((item) => (
+          item.id === result.found_report?.id ? result.found_report : item
+        )));
+      }
+      setEditingMyReport(null);
+      setShowResolvePanel(false);
+      setResolveChoice("");
+      setNotice(result.found_report
+        ? "已完成結案，協尋案件已關閉，對應拾獲物也已改為已認領。"
+        : "已完成結案，這筆持續協尋已停止。"
+      );
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "案件結案失敗");
+    } finally {
+      setMyResolving(false);
     }
   };
 
@@ -460,7 +658,7 @@ export default function MobilePage() {
                       <h3>{[report.color, report.category].filter(Boolean).join(" ") || "拾獲物品"}</h3>
                       <p>{report.location || "地點由校方確認"} · {formatTime(report.occurred_at)}</p>
                       <ul>{match.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
-                      <button onClick={() => void claim(match)}>這可能是我的</button>
+                      <button onClick={() => openClaim(match)}>這可能是我的</button>
                     </div>
                   </article>
                 ))}
@@ -468,7 +666,93 @@ export default function MobilePage() {
             )}
           </section>
         )}
+
+        {tab === "mine" && (
+          <section className={styles.formPage}>
+            <button className={styles.back} onClick={() => setTab("items")}>← 返回</button>
+            <small>MY SEARCHES</small>
+            <h1>我的持續協尋</h1>
+            <p>查看你透過 LINE 或此頁建立的遺失案件與目前處理狀態。</p>
+            {!lineAccessToken && <p className={styles.empty}>請從 LINE 開啟 LostLink，登入後即可查看自己的案件。</p>}
+            {lineAccessToken && myReports.length === 0 && <p className={styles.empty}>目前沒有持續協尋案件。</p>}
+            {lineAccessToken && myReports.length > 0 && (
+              <div className={styles.grid}>
+                {myReports.map((report) => (
+                  <button type="button" className={styles.myCaseButton} key={report.id} onClick={() => void openMyReportEditor(report)}>
+                    <article className={styles.card}>
+                      <div className={styles.photo}>
+                        {report.image_url
+                          ? <PrivateReportImage reportId={report.id} accessToken={lineAccessToken} />
+                          : <span>沒有提供照片</span>}
+                        <em>{report.status === "returned" ? "已結案" : report.status === "claim_pending" ? "認領確認中" : "持續協尋中"}</em>
+                      </div>
+                      <div className={styles.cardBody}>
+                        <h3>{[report.color, report.category].filter(Boolean).join(" ") || "遺失物品"}</h3>
+                        <p>⌖ {report.location || "遺失地點未提供"}</p>
+                        <p>◷ {formatTime(report.occurred_at)}</p>
+                        <p title={report.description}>{report.description}</p>
+                        <span className={styles.editHint}>點擊查看與修改</span>
+                      </div>
+                    </article>
+                  </button>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
       </main>
+
+      {editingMyReport && (
+        <div className={styles.modalBackdrop} onClick={() => !myEditSaving && setEditingMyReport(null)}>
+          <section className={styles.myEditModal} role="dialog" aria-modal="true" aria-labelledby="my-edit-title" onClick={(event) => event.stopPropagation()}>
+            <button type="button" className={styles.claimClose} onClick={() => setEditingMyReport(null)} disabled={myEditSaving} aria-label="關閉案件編輯">×</button>
+            <small>EDIT MY SEARCH</small>
+            <h2 id="my-edit-title">修改持續協尋資料</h2>
+            <p>儲存後會更新資料庫，並依新描述重新建立 AI 特徵及候選配對。</p>
+            <form onSubmit={saveMyReport}>
+              <label>物品描述<textarea value={myEditDescription} onChange={(event) => setMyEditDescription(event.target.value)} maxLength={2000} /></label>
+              <label>遺失地點<input value={myEditLocation} onChange={(event) => setMyEditLocation(event.target.value)} placeholder="例如：ZB301 教室" maxLength={240} /></label>
+              <label>遺失時間<input type="datetime-local" value={myEditTime} onChange={(event) => setMyEditTime(event.target.value)} /></label>
+              <div className={styles.claimActions}>
+                <button type="button" className={styles.claimCancel} onClick={() => setEditingMyReport(null)} disabled={myEditSaving}>取消</button>
+                <button type="submit" className={styles.claimSubmit} disabled={myEditSaving}>{myEditSaving ? "重新分析中…" : "儲存並重新比對"}</button>
+              </div>
+            </form>
+            {editingMyReport.status !== "returned" && (
+              <section className={styles.resolveSection}>
+                {!showResolvePanel ? (
+                  <button type="button" className={styles.resolveStart} onClick={() => setShowResolvePanel(true)}>我已找到物品</button>
+                ) : (
+                  <>
+                    <h3>確認物品如何找回</h3>
+                    <p>請選擇實際領回的待認領物；若是在其他地方自行找到，只會停止這筆協尋。</p>
+                    <div className={styles.resolveOptions}>
+                      {myReportMatches.map((match) => {
+                        const found = reports.find((item) => item.id === match.found_report_id);
+                        if (!found || found.status === "returned") return null;
+                        return (
+                          <label key={match.id}>
+                            <input type="radio" name="resolve-source" value={found.id} checked={resolveChoice === found.id} onChange={(event) => setResolveChoice(event.target.value)} />
+                            <span><b>{[found.color, found.category].filter(Boolean).join(" ") || "待認領物品"}</b><small>{found.location || "地點未提供"} · 相似度 {Math.round(match.score * 100)}%</small></span>
+                          </label>
+                        );
+                      })}
+                      <label>
+                        <input type="radio" name="resolve-source" value="self" checked={resolveChoice === "self"} onChange={(event) => setResolveChoice(event.target.value)} />
+                        <span><b>我在其他地方自行找到</b><small>只停止協尋，不修改任何待認領物</small></span>
+                      </label>
+                    </div>
+                    <div className={styles.resolveActions}>
+                      <button type="button" className={styles.claimCancel} onClick={() => { setShowResolvePanel(false); setResolveChoice(""); }} disabled={myResolving}>返回</button>
+                      <button type="button" className={styles.resolveConfirm} onClick={() => void resolveMyReport()} disabled={!resolveChoice || myResolving}>{myResolving ? "更新中…" : "確認已找到並結案"}</button>
+                    </div>
+                  </>
+                )}
+              </section>
+            )}
+          </section>
+        </div>
+      )}
 
       {selectedReport && (
         <div className={styles.modalBackdrop} onClick={() => setSelectedReport(null)}>
@@ -519,10 +803,53 @@ export default function MobilePage() {
         </div>
       )}
 
+      {claimingMatch && (
+        <div className={styles.modalBackdrop} onClick={closeClaim}>
+          <section
+            className={styles.claimModal}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="claim-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button type="button" className={styles.claimClose} onClick={closeClaim} aria-label="關閉認領申請">×</button>
+            <span className={styles.claimIcon} aria-hidden="true">✓</span>
+            <small>PRIVATE VERIFICATION</small>
+            <h2 id="claim-title">確認這是你的物品嗎？</h2>
+            <p>請提供一項只有你知道的特徵，校方會用來核對身分，內容不會公開。</p>
+            <form onSubmit={claim}>
+              <label htmlFor="private-evidence">私密辨識特徵</label>
+              <textarea
+                id="private-evidence"
+                value={claimEvidence}
+                onChange={(event) => {
+                  setClaimEvidence(event.target.value);
+                  if (claimError) setClaimError("");
+                }}
+                placeholder="例如：傘柄內側刻有名字，或保護殼右下角有一道刮痕"
+                maxLength={300}
+                autoFocus
+              />
+              <div className={styles.claimMeta}>
+                <span>{claimError || "請勿填寫密碼、身分證字號等敏感資料"}</span>
+                <b>{claimEvidence.length}/300</b>
+              </div>
+              <div className={styles.claimActions}>
+                <button type="button" className={styles.claimCancel} onClick={closeClaim} disabled={claimSubmitting}>取消</button>
+                <button type="submit" className={styles.claimSubmit} disabled={claimSubmitting}>
+                  {claimSubmitting ? "送出中…" : "送出認領申請"}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
       <nav className={styles.nav}>
         <button className={tab === "items" ? styles.active : ""} onClick={() => setTab("items")}><b>⌂</b><span>拾獲物</span></button>
         <button className={tab === "found" ? styles.active : ""} onClick={() => setTab("found")}><b>＋</b><span>我要登記</span></button>
         <button className={tab === "lost" ? styles.active : ""} onClick={() => setTab("lost")}><b>⌕</b><span>尋找物品</span></button>
+        <button className={tab === "mine" ? styles.active : ""} onClick={() => { setTab("mine"); if (lineAccessToken) void loadMyReports(lineAccessToken); }}><b>◎</b><span>我的協尋</span></button>
       </nav>
     </div>
   );

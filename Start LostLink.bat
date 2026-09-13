@@ -9,11 +9,10 @@ if not errorlevel 1 (
 )
 if errorlevel 1 (
   echo.
-  echo LostLink 啟動失敗，請查看上方錯誤訊息。
+  echo LostLink 啟動失敗，請保留此視窗並查看上方訊息。
   pause
   exit /b 1
 )
 echo.
-echo LostLink 已在背景執行，可以關閉這個視窗。
-pause
+echo LostLink 已可使用，視窗將自動關閉。
 endlocal

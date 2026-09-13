@@ -8,7 +8,7 @@
 
 ### 新增
 
-- 新增「啟動 LostLink.bat」與「關閉 LostLink.bat」，可一鍵啟動或停止後端、SQLite、前端、Ollama 與已設定的 ngrok，並相容 Windows PowerShell 5.1 的 UTF-8 腳本讀取。
+- 新增「Start LostLink.bat」與「Stop LostLink.bat」，可一鍵啟動或停止後端、SQLite、前端、Ollama 與已設定的 ngrok，並相容 Windows PowerShell 5.1 的 UTF-8 腳本讀取。
 - 一般聊天中的明確遺失描述可直接查詢待認領拾獲物，不會建立案件。
 - 一般聊天收到照片後會暫存 10 分鐘；使用者要求尋找相似物時，會以照片與文字特徵比對資料庫。
 - 查無結果時提供「開啟持續協尋」，只有使用者明確確認後才建立遺失案件。

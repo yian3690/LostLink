@@ -12,6 +12,7 @@ from app.core.config import Settings, get_settings
 from app.core.database import get_session
 from app.models.entities import ItemReport, User
 from app.schemas.reports import ReportCreate
+from app.services.ai import CATEGORY_ZH, COLOR_ZH
 from app.services.line import (
     LineClient,
     build_match_messages,
@@ -170,6 +171,46 @@ def _mode_menu_message(text: str = "請先選擇你要辦理的項目：") -> li
     ]
 
 
+def _lost_photo_intent_message(summary: str) -> list[dict]:
+    label = summary.removeprefix("AI 圖像辨識：").strip()[:90] or "這件物品"
+    return [
+        {
+            "type": "text",
+            "text": (
+                f"照片收到了！我初步辨識為「{label}」。\n"
+                "你想用這張照片立即搜尋待認領物品，還是建立持續協尋？"
+            ),
+            "quickReply": {
+                "items": [
+                    {"type": "action", "action": {"type": "postback", "label": "立即搜尋", "data": "action=search_photo", "displayText": "用這張照片立即搜尋"}},
+                    {"type": "action", "action": {"type": "postback", "label": "建立持續協尋", "data": "action=enable_tracking", "displayText": "用這張照片建立持續協尋"}},
+                    {"type": "action", "action": {"type": "postback", "label": "取消", "data": "action=continue_chat", "displayText": "取消照片操作"}},
+                ]
+            },
+        }
+    ]
+
+
+def _photo_role_intent_message(summary: str) -> list[dict]:
+    label = summary.removeprefix("AI 圖像辨識：").strip()[:90] or "這件物品"
+    return [
+        {
+            "type": "text",
+            "text": (
+                f"照片收到了！我初步辨識為「{label}」。\n"
+                "請問這是你撿到的物品、你遺失的物品，還是只想詢問其他事情？"
+            ),
+            "quickReply": {
+                "items": [
+                    {"type": "action", "action": {"type": "postback", "label": "我撿到的", "data": "action=photo_found", "displayText": "這是我撿到的物品"}},
+                    {"type": "action", "action": {"type": "postback", "label": "我遺失的", "data": "action=photo_lost", "displayText": "這是我遺失的物品"}},
+                    {"type": "action", "action": {"type": "postback", "label": "其他／取消", "data": "action=continue_chat", "displayText": "其他用途，取消照片操作"}},
+                ]
+            },
+        }
+    ]
+
+
 def _found_time_confirmation_message() -> list[dict]:
     return [
         {
@@ -186,18 +227,96 @@ def _found_time_confirmation_message() -> list[dict]:
     ]
 
 
+def _is_tracking_request(text: str) -> bool:
+    compact = text.replace(" ", "")
+    return any(
+        term in compact
+        for term in (
+            "持續搜尋",
+            "持續協尋",
+            "建立協尋",
+            "幫我追蹤",
+        )
+    ) and not any(term in compact for term in ("關閉", "取消", "停止"))
+
+
+def _tracking_missing_fields(description: str, has_image: bool) -> list[str]:
+    missing: list[str] = []
+    if ReportService._is_generic_item_query(description) and not has_image:
+        missing.append("物品名稱、顏色或照片")
+    if not extract_location(description) and not any(
+        term in description for term in ("地點不確定", "不知道地點", "地點不知道")
+    ):
+        missing.append("遺失地點")
+    if not extract_time_hint(description) and not any(
+        term in description for term in ("時間不確定", "不知道時間", "時間不知道")
+    ):
+        missing.append("大約遺失時間")
+    return missing
+
+
+def _tracking_details_message(missing: list[str], has_image: bool) -> list[dict]:
+    prefix = "照片與初步特徵已收到。" if has_image else "可以，我會幫你建立持續協尋。"
+    return [
+        {
+            "type": "text",
+            "text": (
+                f"{prefix}請再補充{'、'.join(missing)}；"
+                "也可以加上品牌、刮痕、貼紙等文字特徵。"
+                "如果真的不確定，可直接說「地點不確定」或「時間不確定」。"
+            ),
+        }
+    ]
+
+
+def _tracking_confirmation_message(description: str) -> list[dict]:
+    time_hint = extract_time_hint(description)
+    location = extract_location(description) or "未提供"
+    occurred = time_hint[0].strftime("%Y/%m/%d %H:%M") if time_hint else "未提供"
+    summary = description[:220]
+    return [
+        {
+            "type": "text",
+            "text": (
+                "請確認持續協尋資料：\n"
+                f"物品與特徵：{summary}\n"
+                f"遺失地點：{location}\n"
+                f"遺失時間：{occurred}\n"
+                "確認後才會建立案件並持續比對新的拾獲物。"
+            ),
+            "quickReply": {
+                "items": [
+                    {"type": "action", "action": {"type": "postback", "label": "確認建立", "data": "action=confirm_tracking", "displayText": "確認建立持續協尋"}},
+                    {"type": "action", "action": {"type": "message", "label": "補充資料", "text": "我要補充協尋資料"}},
+                    {"type": "action", "action": {"type": "postback", "label": "取消", "data": "action=continue_chat", "displayText": "取消建立持續協尋"}},
+                ]
+            },
+        }
+    ]
+
+
 async def _found_registered_messages(
     request: Request,
     session: AsyncSession,
     report: ItemReport,
     matches,
 ) -> list[dict]:
-    messages = await _candidate_messages(request, session, report, matches)
-    messages[0]["text"] = (
-        "感謝提供資訊，我已經收到你提供的資料，拾獲物已完成登記。\n"
-        + messages[0]["text"]
-    )
-    return messages
+    if matches:
+        return [{
+            "type": "text",
+            "text": (
+                "感謝提供資訊，我已經收到你提供的資料，拾獲物已完成登記。\n"
+                "系統找到可能相符的遺失案件，會通知最相符的失主進一步確認。"
+                "為保護雙方隱私，不會在這裡顯示失主的登記內容，也不會把你剛上傳的照片當成候選物品傳回。"
+            ),
+        }]
+    return [{
+        "type": "text",
+        "text": (
+            "感謝提供資訊，我已經收到你提供的資料，拾獲物已完成登記。\n"
+            "目前還沒有相符的遺失案件；之後若出現高度相符的持續協尋，系統會再通知失主確認。"
+        ),
+    }]
 
 
 def _public_base_url(request: Request) -> str:
@@ -482,6 +601,10 @@ async def line_webhook(
                 "action=start_found",
                 "action=continue_chat",
                 "action=enable_tracking",
+                "action=confirm_tracking",
+                "action=search_photo",
+                "action=photo_found",
+                "action=photo_lost",
                 "action=confirm_found_now",
                 "action=provide_found_time",
             }:
@@ -498,30 +621,101 @@ async def line_webhook(
                     "已進入一般聊天。接下來的文字與照片都不會建立案件；需要協尋或登記時，再從下方選單選擇即可。",
                 )
                 continue
+            if action in {"action=photo_found", "action=photo_lost"}:
+                pending_intent = _take_pending_intent(line_user_id)
+                pending_image = _take_pending_image(line_user_id)
+                if not pending_intent or pending_intent[0] != "photo" or not pending_image:
+                    await client.reply(reply_token, "找不到剛才的照片，請重新傳送一次。")
+                    continue
+                description = pending_intent[1]
+                kind = "found" if action == "action=photo_found" else "lost"
+                _store_pending_intent(line_user_id, kind, description)
+                _store_pending_image(line_user_id, pending_image)
+                _store_active_mode(line_user_id, kind)
+                if kind == "found":
+                    await client.reply(
+                        reply_token,
+                        "了解，這是你撿到的物品。請再告訴我撿到地點與時間；也可以補充品牌、文字、刮痕或貼紙等特徵。資料確認完整後才會建立拾獲案件。",
+                    )
+                else:
+                    await client.reply(reply_token, _lost_photo_intent_message(description))
+                continue
+            if action == "action=search_photo":
+                pending_image = _take_pending_image(line_user_id)
+                if not pending_image:
+                    await client.reply(
+                        reply_token,
+                        "找不到剛才的照片，請重新傳送一次。",
+                    )
+                    continue
+                await client.reply(
+                    reply_token,
+                    await _temporary_search_messages(
+                        request,
+                        service,
+                        "",
+                        pending_image,
+                        line_user_id,
+                    ),
+                )
+                continue
             if action == "action=enable_tracking":
                 pending_intent = _take_pending_intent(line_user_id)
                 pending_image = _take_pending_image(line_user_id)
                 if not pending_intent:
-                    _store_active_mode(line_user_id, "lost")
+                    _store_active_mode(line_user_id, "tracking")
                     await client.reply(
                         reply_token,
-                        "請先描述遺失物的名稱、顏色、地點與時間，或傳一張照片；查詢後才能開啟持續協尋。",
+                        _tracking_details_message(
+                            ["物品名稱、顏色或照片", "遺失地點", "大約遺失時間"],
+                            False,
+                        ),
                     )
                     continue
                 _, description = pending_intent
-                if service._is_generic_item_query(description) and not pending_image:
-                    _store_active_mode(line_user_id, "lost")
-                    _store_pending_intent(line_user_id, "lost", description)
+                _store_active_mode(line_user_id, "tracking")
+                _store_pending_intent(line_user_id, "lost", description)
+                if pending_image:
+                    _store_pending_image(line_user_id, pending_image)
+                missing = _tracking_missing_fields(description, bool(pending_image))
+                if missing:
                     await client.reply(
                         reply_token,
-                        "開啟持續協尋前，請再補充物品名稱、顏色或照片，避免建立無法有效比對的案件。",
+                        _tracking_details_message(missing, bool(pending_image)),
                     )
                     continue
+                _store_active_mode(line_user_id, "tracking_confirm")
+                await client.reply(reply_token, _tracking_confirmation_message(description))
+                continue
+            if action == "action=confirm_tracking":
+                pending_intent = _take_pending_intent(line_user_id)
+                pending_image = _take_pending_image(line_user_id)
+                if not pending_intent or pending_intent[0] != "lost":
+                    _store_active_mode(line_user_id, "tracking")
+                    await client.reply(
+                        reply_token,
+                        _tracking_details_message(
+                            ["物品名稱、顏色或照片", "遺失地點", "大約遺失時間"],
+                            False,
+                        ),
+                    )
+                    continue
+                description = pending_intent[1]
+                missing = _tracking_missing_fields(description, bool(pending_image))
+                if missing:
+                    _store_pending_intent(line_user_id, "lost", description)
+                    if pending_image:
+                        _store_pending_image(line_user_id, pending_image)
+                    _store_active_mode(line_user_id, "tracking")
+                    await client.reply(reply_token, _tracking_details_message(missing, bool(pending_image)))
+                    continue
+                time_hint = extract_time_hint(description)
                 report, matches = await service.create(
                     ReportCreate(
                         kind="lost",
                         description=description,
                         location=extract_location(description),
+                        occurred_at=time_hint[0] if time_hint else None,
                         line_user_id=line_user_id,
                         image_base64=(
                             base64.b64encode(pending_image).decode("ascii")
@@ -577,7 +771,7 @@ async def line_webhook(
             _pending_intents.pop(line_user_id, None)
             _store_active_mode(line_user_id, kind)
             prompt = (
-                "請描述遺失物名稱、顏色、地點與時間，或直接傳照片。我會先查詢待認領物品，不會建立案件；查無結果時，你可以自行選擇是否開啟持續協尋通知。"
+                "請描述遺失物名稱、顏色、地點與時間，或直接傳照片。收到照片後我會先詢問用途；只有你確認時才會搜尋或建立持續協尋。"
                 if kind == "lost"
                 else "已切換為「拾獲物登記」。請描述撿到的物品與地點，也可以先傳照片。資料完整後才會建立案件。"
             )
@@ -598,6 +792,47 @@ async def line_webhook(
                     reply_token,
                     "已回到一般聊天。你仍可直接詢問遺失物或傳照片搜尋；只有登記拾獲物及明確開啟持續協尋時才會寫入資料庫。",
                 )
+                continue
+            if _is_tracking_request(raw_text):
+                if line_user_id:
+                    _clear_active_mode(line_user_id)
+                    _store_active_mode(line_user_id, "tracking")
+                await client.reply(
+                    reply_token,
+                    _tracking_details_message(
+                        ["物品名稱、顏色或照片", "遺失地點", "大約遺失時間"],
+                        False,
+                    ),
+                )
+                continue
+            active_mode = _get_active_mode(line_user_id)
+            if active_mode in {"tracking", "tracking_confirm"}:
+                pending_context = _take_pending_intent(line_user_id)
+                previous = (
+                    pending_context[1]
+                    if pending_context and pending_context[0] == "lost"
+                    else ""
+                )
+                pending_image = _take_pending_image(line_user_id)
+                combined = "；".join(
+                    dict.fromkeys(value for value in (previous, raw_text) if value)
+                )
+                _store_pending_intent(line_user_id, "lost", combined)
+                if pending_image:
+                    _store_pending_image(line_user_id, pending_image)
+                missing = _tracking_missing_fields(combined, bool(pending_image))
+                if missing:
+                    _store_active_mode(line_user_id, "tracking")
+                    await client.reply(
+                        reply_token,
+                        _tracking_details_message(missing, bool(pending_image)),
+                    )
+                else:
+                    _store_active_mode(line_user_id, "tracking_confirm")
+                    await client.reply(
+                        reply_token,
+                        _tracking_confirmation_message(combined),
+                    )
                 continue
             image_follow_up = _has_pending_image(line_user_id) and _is_image_search_request(raw_text)
             if _is_vague_search_request(raw_text) and not image_follow_up:
@@ -763,15 +998,79 @@ async def line_webhook(
                 await client.reply(reply_token, "尚未設定 LINE Access Token。")
                 continue
             if mode != "found":
+                if not line_user_id:
+                    await client.reply(reply_token, "無法取得 LINE 使用者資料，請重新開啟聊天室後再試。")
+                    continue
+                _cleanup_pending()
+                pending_value = _pending_intents.get(line_user_id)
+                pending_description = (
+                    pending_value[2]
+                    if pending_value and pending_value[1] == "lost"
+                    else ""
+                )
+                if pending_description and _is_image_search_request(pending_description):
+                    await client.reply(
+                        reply_token,
+                        await _temporary_search_messages(
+                            request,
+                            service,
+                            pending_description,
+                            image,
+                            line_user_id,
+                        ),
+                    )
+                    continue
+                attributes = await service.analyzer.analyze(
+                    pending_description or "使用者上傳的遺失物照片",
+                    image,
+                )
+                analyzed_description = (
+                    attributes.normalized_description
+                    or pending_description
+                    or "使用者上傳的遺失物照片"
+                )
+                if _generic_description(analyzed_description):
+                    visual_summary = "".join(
+                        (
+                            COLOR_ZH.get(attributes.color or "", ""),
+                            CATEGORY_ZH.get(attributes.category or "", "物品"),
+                        )
+                    )
+                    analyzed_description = f"AI 圖像辨識：{visual_summary}"
+                if pending_description and not _generic_description(pending_description):
+                    analyzed_description = "；".join(
+                        dict.fromkeys((pending_description, analyzed_description))
+                    )
+                if mode in {"tracking", "tracking_confirm"}:
+                    _store_pending_intent(line_user_id, "lost", analyzed_description)
+                    _store_pending_image(line_user_id, image)
+                    missing = _tracking_missing_fields(analyzed_description, True)
+                    if missing:
+                        _store_active_mode(line_user_id, "tracking")
+                        await client.reply(
+                            reply_token,
+                            _tracking_details_message(missing, True),
+                        )
+                    else:
+                        _store_active_mode(line_user_id, "tracking_confirm")
+                        await client.reply(
+                            reply_token,
+                            _tracking_confirmation_message(analyzed_description),
+                        )
+                    continue
+                if mode == "lost":
+                    _store_pending_intent(line_user_id, "lost", analyzed_description)
+                    _store_pending_image(line_user_id, image)
+                    await client.reply(
+                        reply_token,
+                        _lost_photo_intent_message(analyzed_description),
+                    )
+                    continue
+                _store_pending_intent(line_user_id, "photo", analyzed_description)
+                _store_pending_image(line_user_id, image)
                 await client.reply(
                     reply_token,
-                    await _temporary_search_messages(
-                        request,
-                        service,
-                        "使用者上傳的遺失物照片",
-                        image,
-                        line_user_id,
-                    ),
+                    _photo_role_intent_message(analyzed_description),
                 )
                 continue
             pending_intent = _take_pending_intent(line_user_id)

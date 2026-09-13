@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import PROJECT_ROOT, Settings
 from app.models.entities import (
+    AuditLog,
     ItemEmbedding,
     ItemImage,
     ItemReport,
@@ -21,9 +22,14 @@ from app.models.entities import (
     User,
     new_id,
 )
-from app.schemas.reports import DashboardStats, ReportCreate
+from app.schemas.reports import DashboardStats, OwnerReportUpdate, ReportCreate, ReportFeaturesUpdate
 from app.services.ai import CATEGORY_TERMS, MultimodalAnalyzer, get_embedding_service
-from app.services.matching import MatchResult, location_score, score_reports
+from app.services.matching import (
+    MatchResult,
+    container_subtype,
+    location_score,
+    score_reports,
+)
 from app.services.line import LineClient
 from app.services.line import extract_location, extract_time_hint, time_hint_matches
 
@@ -173,6 +179,13 @@ class ReportService:
                 {query_report.category},
             )
             candidates = [item for item in candidates if item.category in allowed]
+        query_container_subtype = container_subtype(query_report)
+        if query_container_subtype:
+            candidates = [
+                item
+                for item in candidates
+                if container_subtype(item) in {None, query_container_subtype}
+            ]
         location_was_used = bool(query_report.location)
         if query_report.location:
             candidates = [
@@ -298,6 +311,172 @@ class ReportService:
         await self._dispatch_notifications(matches)
         return report, matches
 
+    async def update_owned_report(
+        self, report_id: str, line_user_id: str, payload: OwnerReportUpdate
+    ) -> tuple[ItemReport, list[MatchCandidate]] | None:
+        report = await self.session.scalar(
+            select(ItemReport)
+            .join(User, User.id == ItemReport.user_id)
+            .options(selectinload(ItemReport.embedding), selectinload(ItemReport.images))
+            .where(
+                ItemReport.id == report_id,
+                ItemReport.kind == "lost",
+                User.line_user_id == line_user_id,
+            )
+        )
+        if not report:
+            return None
+        attributes = await self.analyzer.analyze(payload.description.strip())
+        report.description = attributes.normalized_description or payload.description.strip()
+        report.category = attributes.category
+        report.brand = attributes.brand
+        report.color = attributes.color
+        report.distinctive_features = attributes.distinctive_features
+        report.location = payload.location.strip() if payload.location and payload.location.strip() else None
+        report.occurred_at = payload.occurred_at
+        return await self._reindex_updated_report(report)
+
+    async def replace_admin_details(
+        self, report_id: str, payload: ReportFeaturesUpdate
+    ) -> tuple[ItemReport, list[MatchCandidate]] | None:
+        report = await self.session.scalar(
+            select(ItemReport)
+            .options(selectinload(ItemReport.embedding), selectinload(ItemReport.images))
+            .where(ItemReport.id == report_id)
+        )
+        if not report:
+            return None
+        report.description = payload.description.strip()
+        report.category = payload.category.strip() if payload.category and payload.category.strip() else None
+        report.brand = payload.brand.strip() if payload.brand and payload.brand.strip() else None
+        report.color = payload.color.strip() if payload.color and payload.color.strip() else None
+        report.distinctive_features = [
+            value.strip()
+            for value in payload.distinctive_features
+            if value.strip()
+        ][:30]
+        report.location = payload.location.strip() if payload.location and payload.location.strip() else None
+        report.occurred_at = payload.occurred_at
+        return await self._reindex_updated_report(report)
+
+    async def resolve_owned_report(
+        self,
+        report_id: str,
+        line_user_id: str,
+        found_report_id: str | None = None,
+    ) -> tuple[ItemReport, ItemReport | None] | None:
+        lost = await self.session.scalar(
+            select(ItemReport)
+            .join(User, User.id == ItemReport.user_id)
+            .options(selectinload(ItemReport.images))
+            .where(
+                ItemReport.id == report_id,
+                ItemReport.kind == "lost",
+                User.line_user_id == line_user_id,
+            )
+        )
+        if not lost:
+            return None
+
+        found = None
+        match = None
+        if found_report_id:
+            match = await self.session.scalar(
+                select(MatchCandidate).where(
+                    MatchCandidate.lost_report_id == lost.id,
+                    MatchCandidate.found_report_id == found_report_id,
+                )
+            )
+            if not match:
+                raise ValueError("Selected found item is not matched to this search")
+            found = await self.session.scalar(
+                select(ItemReport)
+                .options(selectinload(ItemReport.images))
+                .where(
+                    ItemReport.id == found_report_id,
+                    ItemReport.kind == "found",
+                )
+            )
+            if not found:
+                raise ValueError("Selected found item no longer exists")
+            found.status = "returned"
+
+        related_match_filter = MatchCandidate.lost_report_id == lost.id
+        if found:
+            related_match_filter = or_(
+                related_match_filter,
+                MatchCandidate.found_report_id == found.id,
+            )
+        related_matches = list(
+            await self.session.scalars(
+                select(MatchCandidate).where(related_match_filter)
+            )
+        )
+        reviewed_at = datetime.now(timezone.utc)
+        for related_match in related_matches:
+            is_selected = bool(match and related_match.id == match.id)
+            related_match.decision = "claimed" if is_selected else "dismissed"
+            pending_claims = list(
+                await self.session.scalars(
+                    select(Claim).where(
+                        Claim.match_id == related_match.id,
+                        Claim.status == "pending",
+                    )
+                )
+            )
+            for claim in pending_claims:
+                claim.status = "approved" if is_selected else "rejected"
+                claim.reviewed_by = lost.user_id
+                claim.reviewed_at = reviewed_at
+
+        lost.status = "returned"
+        self.session.add(
+            AuditLog(
+                actor_user_id=lost.user_id,
+                action="report.resolved_by_owner",
+                entity_type="item_report",
+                entity_id=lost.id,
+                details={"found_report_id": found.id if found else None},
+            )
+        )
+        await self.session.commit()
+        return lost, found
+
+    async def _reindex_updated_report(
+        self, report: ItemReport
+    ) -> tuple[ItemReport, list[MatchCandidate]]:
+        embedding_text = "；".join(
+            value
+            for value in (
+                report.description,
+                report.category,
+                report.color,
+                report.brand,
+                "、".join(report.distinctive_features),
+            )
+            if value
+        )
+        e5_text = await self.embeddings.encode_e5(embedding_text)
+        siglip_text = await self.embeddings.encode_siglip_text(embedding_text)
+        if report.embedding is None:
+            report.embedding = ItemEmbedding(
+                e5_text=e5_text,
+                siglip_text=siglip_text,
+                e5_model=self.settings.e5_model,
+                siglip_model=self.settings.siglip_model,
+            )
+        else:
+            report.embedding.e5_text = e5_text
+            report.embedding.siglip_text = siglip_text
+            report.embedding.e5_model = self.settings.e5_model
+            report.embedding.siglip_model = self.settings.siglip_model
+        await self._clear_matches(report.id)
+        await self.session.flush()
+        matches = await self._find_matches(report)
+        await self.session.commit()
+        await self._dispatch_notifications(matches)
+        return report, matches
+
     async def delete_report(self, report_id: str) -> bool:
         report = await self.session.scalar(
             select(ItemReport)
@@ -373,6 +552,22 @@ class ReportService:
         result = await self.session.scalars(query)
         return list(result)
 
+    async def list_user_reports(
+        self, line_user_id: str, limit: int = 50, kind: str | None = None
+    ) -> list[ItemReport]:
+        query = (
+            select(ItemReport)
+            .join(User, User.id == ItemReport.user_id)
+            .options(selectinload(ItemReport.images))
+            .where(User.line_user_id == line_user_id)
+            .order_by(ItemReport.created_at.desc())
+            .limit(limit)
+        )
+        if kind:
+            query = query.where(ItemReport.kind == kind)
+        result = await self.session.scalars(query)
+        return list(result)
+
     async def public_thumbnail(self, report_id: str) -> Path | None:
         report = await self.session.scalar(
             select(ItemReport)
@@ -391,6 +586,33 @@ class ReportService:
             return None
         return thumbnail if thumbnail.is_file() else None
 
+    async def protected_thumbnail(self, report_id: str) -> Path | None:
+        report = await self.session.scalar(
+            select(ItemReport)
+            .options(selectinload(ItemReport.images))
+            .where(ItemReport.id == report_id)
+        )
+        return self._thumbnail_path(report)
+
+    async def owner_thumbnail(self, report_id: str, line_user_id: str) -> Path | None:
+        report = await self.session.scalar(
+            select(ItemReport)
+            .join(User, User.id == ItemReport.user_id)
+            .options(selectinload(ItemReport.images))
+            .where(ItemReport.id == report_id, User.line_user_id == line_user_id)
+        )
+        return self._thumbnail_path(report)
+
+    @staticmethod
+    def _thumbnail_path(report: ItemReport | None) -> Path | None:
+        if not report or not report.images or not report.images[0].thumbnail_path:
+            return None
+        uploads_root = (PROJECT_ROOT / "uploads").resolve()
+        thumbnail = (PROJECT_ROOT / report.images[0].thumbnail_path).resolve()
+        if uploads_root not in thumbnail.parents:
+            return None
+        return thumbnail if thumbnail.is_file() else None
+
     async def list_matches(self, report_id: str) -> list[MatchCandidate]:
         result = await self.session.scalars(
             select(MatchCandidate)
@@ -398,7 +620,8 @@ class ReportService:
                 or_(
                     MatchCandidate.lost_report_id == report_id,
                     MatchCandidate.found_report_id == report_id,
-                )
+                ),
+                MatchCandidate.decision != "dismissed",
             )
             .order_by(MatchCandidate.score.desc())
         )
@@ -515,7 +738,7 @@ class ReportService:
         ranked = sorted(matches, key=lambda item: item.score, reverse=True)
         # A found item can have only one true owner. Notify only the single
         # highest-confidence lost report; keep other candidates for admin review.
-        best = next((item for item in ranked if item.decision == "notify"), None)
+        best = next((item for item in ranked if item.decision in {"notify", "review"}), None)
         if best:
             lost = await self.session.get(ItemReport, best.lost_report_id)
             existing_notification = await self.session.scalar(
@@ -543,7 +766,7 @@ class ReportService:
             return
         client = LineClient(self.settings)
         for match in matches:
-            if match.decision != "notify":
+            if match.decision not in {"notify", "review"}:
                 continue
             notification = await self.session.scalar(
                 select(Notification).where(
@@ -563,10 +786,10 @@ class ReportService:
                         {
                             "type": "text",
                             "text": (
-                                "有人撿到一件很像你遺失物的東西，請再確認一下。"
+                                "有人撿到一件可能和你的遺失物相似的東西，請先確認照片與特徵。"
                                 f"\n配對信心：{match.score:.0%}"
                                 f"\n原因：{'、'.join(match.reasons) or '多項特徵接近'}"
-                                "\n這只是候選結果，確認特徵後再提出認領。"
+                                "\n這只是候選結果，不代表已確認為你的物品。"
                             ),
                             "quickReply": {
                                 "items": [
