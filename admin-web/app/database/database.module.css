@@ -29,6 +29,9 @@
 .toolbar h2 span { color: #77857d; font-size: 13px; font-weight: 600; }
 .filters { display: flex; gap: 9px; }
 .filters input { width: min(280px, 40vw); }
+.deletePage { flex: 0 0 auto; min-height: 43px; border: 1px solid #efb7af; border-radius: 11px; padding: 10px 13px; color: #a33b2f; background: #fff; white-space: nowrap; }
+.deletePage:hover:not(:disabled) { border-color: #cf695c; background: #ffe5e1; }
+.deletePage:disabled { cursor: default; opacity: .4; }
 .tableWrap { overflow-x: auto; }
 .dataPanel table { min-width: 1030px; }
 .dataPanel th { white-space: nowrap; }
@@ -37,6 +40,9 @@
 .dataPanel td > span { margin-top: 5px; color: #718078; font-size: 12px; }
 .aiFeatures strong, .aiFeatures span { display: block; }
 .aiFeatures span { margin-top: 6px; color: #68766e; font-size: 12px; line-height: 1.5; }
+.featureList { display: flex !important; flex-wrap: wrap; gap: 5px; }
+.featureList em { display: inline-flex; align-items: center; gap: 5px; border-radius: 7px; padding: 4px 7px; color: #536159; background: #f1f6f3; font-style: normal; line-height: 1.35; }
+.featureList small { color: #078e4d; font-size: 9px; font-weight: 850; }
 .found, .lost { display: inline-block; margin-right: 8px; padding: 5px 8px; border-radius: 7px; font-size: 11px; }
 .found { color: #08723f; background: #e4f8ec; }
 .lost { color: #a33b2f; background: #ffebe8; }
@@ -58,6 +64,25 @@
 .photoModal img { display: block; width: 100%; max-height: 72vh; border-radius: 14px; object-fit: contain; background: #edf2ef; }
 .photoModal p { margin: 14px 38px 2px 2px; color: #405148; line-height: 1.6; }
 .photoClose { position: absolute; z-index: 2; top: 27px; right: 27px; display: grid; width: 40px; height: 40px; place-items: center; padding: 0; border-radius: 50%; color: white; background: rgba(8,36,25,.78); font-size: 24px; }
+.confirmBackdrop { position: fixed; z-index: 110; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(7,27,20,.68); backdrop-filter: blur(7px); }
+.confirmModal { width: min(100%, 470px); border: 1px solid rgba(255,255,255,.7); border-radius: 24px; padding: 30px; background: #fff; box-shadow: 0 32px 100px rgba(3,20,13,.38); }
+.warningIcon { display: grid; width: 48px; height: 48px; place-items: center; margin-bottom: 18px; border-radius: 15px; color: #a33b2f; background: #ffebe8; font-size: 25px; font-weight: 900; }
+.confirmEyebrow { margin: 0 0 6px; color: #b44839; font-size: 10px; font-weight: 900; letter-spacing: .16em; }
+.confirmModal h2 { margin: 0; color: #14231c; font-size: 27px; }
+.confirmDescription { margin: 10px 0 20px; color: #69776f; font-size: 14px; line-height: 1.65; }
+.confirmSummary { display: flex; align-items: center; justify-content: space-between; border: 1px solid #e1e9e4; border-radius: 13px; padding: 13px 15px; color: #617068; background: #f8fbf9; font-size: 13px; }
+.confirmSummary strong { color: #14231c; font-size: 17px; }
+.recordPreview { display: grid; gap: 7px; border: 1px solid #e1e9e4; border-radius: 13px; padding: 15px; background: #f8fbf9; }
+.recordPreview b { color: #14231c; font-size: 14px; line-height: 1.55; }
+.recordPreview span { color: #718078; font-size: 11px; }
+.confirmWarning { display: grid; gap: 3px; margin-top: 12px; border-left: 3px solid #d55a4a; padding: 10px 13px; color: #875047; background: #fff7f5; font-size: 12px; line-height: 1.5; }
+.confirmWarning b { color: #a33b2f; }
+.confirmActions { display: grid; grid-template-columns: 1fr 1.35fr; gap: 10px; margin-top: 24px; }
+.confirmActions button { min-height: 46px; border-radius: 11px; padding: 11px 14px; }
+.confirmCancel { border: 1px solid #d9e4dd; color: #394b42; background: #fff; }
+.confirmDelete { color: #fff; background: #bd4739; }
+.confirmDelete:hover:not(:disabled) { background: #a6382d; }
+.confirmDelete:disabled { cursor: default; opacity: .5; }
 .rowActions { display: flex; flex-wrap: wrap; gap: 7px; min-width: 150px; }
 .rowActions button { padding: 8px 10px; border-radius: 9px; font-size: 11px; white-space: nowrap; }
 .edit, .cancel { color: #26372f; border: 1px solid #d8e3dc; background: white; }
@@ -90,4 +115,5 @@
   .wide { grid-column: auto; }
   .filters { flex-direction: column; }
   .filters input { width: 100%; }
+  .deletePage { width: 100%; }
 }

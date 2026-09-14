@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { categoryLabel, colorLabel } from "./lib/itemLabels";
 
 type Stats = {
   open_lost: number;
@@ -140,7 +141,7 @@ export default function Dashboard() {
                   </td>
                   <td className="description">{report.description}</td>
                   <td>
-                    {[report.color, report.category].filter(Boolean).join(" · ") || "待辨識"}
+                    {[colorLabel(report.color), categoryLabel(report.category, report.description)].filter(Boolean).join(" · ")}
                     {report.distinctive_features.length > 0 && <small>{report.distinctive_features.join("、")}</small>}
                   </td>
                   <td>{report.location || "未提供"}</td>

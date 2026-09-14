@@ -23,7 +23,13 @@ from app.models.entities import (
     new_id,
 )
 from app.schemas.reports import DashboardStats, OwnerReportUpdate, ReportCreate, ReportFeaturesUpdate
-from app.services.ai import CATEGORY_TERMS, MultimodalAnalyzer, get_embedding_service
+from app.services.ai import (
+    CATEGORY_TERMS,
+    MultimodalAnalyzer,
+    get_embedding_service,
+    normalize_category_value,
+    normalize_color_value,
+)
 from app.services.matching import (
     MatchResult,
     container_subtype,
@@ -75,6 +81,7 @@ class ReportService:
             brand=attributes.brand,
             color=attributes.color,
             distinctive_features=attributes.distinctive_features,
+            feature_confidences=attributes.feature_confidences,
             campus=payload.campus,
             location=location,
             occurred_at=payload.occurred_at or (time_hint[0] if time_hint else None),
@@ -140,6 +147,7 @@ class ReportService:
             brand=attributes.brand,
             color=attributes.color,
             distinctive_features=attributes.distinctive_features,
+            feature_confidences=attributes.feature_confidences,
             location=location or extract_location(description),
             occurred_at=time_hint[0] if time_hint else None,
         )
@@ -246,6 +254,10 @@ class ReportService:
         report.distinctive_features = list(
             dict.fromkeys([*report.distinctive_features, *attributes.distinctive_features])
         )
+        report.feature_confidences = {
+            **(report.feature_confidences or {}),
+            **attributes.feature_confidences,
+        }
 
         e5_text = await self.embeddings.encode_e5(report.description)
         siglip_text = await self.embeddings.encode_siglip_text(report.description)
@@ -288,6 +300,7 @@ class ReportService:
         report.brand = attributes.brand
         report.color = attributes.color
         report.distinctive_features = attributes.distinctive_features
+        report.feature_confidences = attributes.feature_confidences
 
         e5_text = await self.embeddings.encode_e5(report.description)
         siglip_text = await self.embeddings.encode_siglip_text(report.description)
@@ -326,15 +339,42 @@ class ReportService:
         )
         if not report:
             return None
-        attributes = await self.analyzer.analyze(payload.description.strip())
+        image_bytes = self._decode_image(payload.image_base64)
+        if image_bytes:
+            self._validate_image(image_bytes)
+        attributes = await self.analyzer.analyze(payload.description.strip(), image_bytes)
         report.description = attributes.normalized_description or payload.description.strip()
         report.category = attributes.category
         report.brand = attributes.brand
         report.color = attributes.color
         report.distinctive_features = attributes.distinctive_features
+        report.feature_confidences = attributes.feature_confidences
         report.location = payload.location.strip() if payload.location and payload.location.strip() else None
         report.occurred_at = payload.occurred_at
-        return await self._reindex_updated_report(report)
+        old_paths: list[str] = []
+        if image_bytes:
+            object_path, thumbnail_path = self._store_image(report.id, image_bytes)
+            if report.images:
+                current = report.images[0]
+                old_paths.extend(
+                    path for path in (current.object_path, current.thumbnail_path) if path
+                )
+                current.object_path = object_path
+                current.thumbnail_path = thumbnail_path
+                current.mime_type = "image/jpeg"
+                current.scan_status = "demo-safe" if self.settings.demo_mode else "pending"
+            else:
+                report.images.append(
+                    ItemImage(
+                        object_path=object_path,
+                        thumbnail_path=thumbnail_path,
+                        mime_type="image/jpeg",
+                        scan_status="demo-safe" if self.settings.demo_mode else "pending",
+                    )
+                )
+        result = await self._reindex_updated_report(report, image_bytes)
+        self._unlink_upload_paths(old_paths)
+        return result
 
     async def replace_admin_details(
         self, report_id: str, payload: ReportFeaturesUpdate
@@ -347,14 +387,17 @@ class ReportService:
         if not report:
             return None
         report.description = payload.description.strip()
-        report.category = payload.category.strip() if payload.category and payload.category.strip() else None
+        report.category = normalize_category_value(payload.category, payload.description)
         report.brand = payload.brand.strip() if payload.brand and payload.brand.strip() else None
-        report.color = payload.color.strip() if payload.color and payload.color.strip() else None
+        report.color = normalize_color_value(payload.color)
         report.distinctive_features = [
             value.strip()
             for value in payload.distinctive_features
             if value.strip()
         ][:30]
+        report.feature_confidences = {
+            feature: 1.0 for feature in report.distinctive_features
+        }
         report.location = payload.location.strip() if payload.location and payload.location.strip() else None
         report.occurred_at = payload.occurred_at
         return await self._reindex_updated_report(report)
@@ -443,7 +486,7 @@ class ReportService:
         return lost, found
 
     async def _reindex_updated_report(
-        self, report: ItemReport
+        self, report: ItemReport, replacement_image: bytes | None = None
     ) -> tuple[ItemReport, list[MatchCandidate]]:
         embedding_text = "；".join(
             value
@@ -458,16 +501,24 @@ class ReportService:
         )
         e5_text = await self.embeddings.encode_e5(embedding_text)
         siglip_text = await self.embeddings.encode_siglip_text(embedding_text)
+        siglip_image = (
+            await self.embeddings.encode_siglip_image(replacement_image)
+            if replacement_image
+            else None
+        )
         if report.embedding is None:
             report.embedding = ItemEmbedding(
                 e5_text=e5_text,
                 siglip_text=siglip_text,
+                siglip_image=siglip_image,
                 e5_model=self.settings.e5_model,
                 siglip_model=self.settings.siglip_model,
             )
         else:
             report.embedding.e5_text = e5_text
             report.embedding.siglip_text = siglip_text
+            if replacement_image:
+                report.embedding.siglip_image = siglip_image
             report.embedding.e5_model = self.settings.e5_model
             report.embedding.siglip_model = self.settings.siglip_model
         await self._clear_matches(report.id)
@@ -476,6 +527,14 @@ class ReportService:
         await self.session.commit()
         await self._dispatch_notifications(matches)
         return report, matches
+
+    @staticmethod
+    def _unlink_upload_paths(paths: list[str]) -> None:
+        uploads_root = (PROJECT_ROOT / "uploads").resolve()
+        for value in paths:
+            target = (PROJECT_ROOT / value).resolve()
+            if uploads_root in target.parents:
+                target.unlink(missing_ok=True)
 
     async def delete_report(self, report_id: str) -> bool:
         report = await self.session.scalar(
@@ -739,7 +798,10 @@ class ReportService:
         # A found item can have only one true owner. Notify only the single
         # highest-confidence lost report; keep other candidates for admin review.
         best = next((item for item in ranked if item.decision in {"notify", "review"}), None)
-        if best:
+        # A newly created lost report already receives its candidates in the
+        # webhook/API response. Only a later found report should create a Push
+        # notification; otherwise the owner receives the same result twice.
+        if report.kind == "found" and best:
             lost = await self.session.get(ItemReport, best.lost_report_id)
             existing_notification = await self.session.scalar(
                 select(Notification).where(Notification.match_id == best.id)

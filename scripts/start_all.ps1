@@ -99,6 +99,22 @@ $env:HF_HUB_DISABLE_XET = "1"
 $env:HF_HUB_DISABLE_SYMLINKS_WARNING = "1"
 $backend = Start-Process -FilePath $pythonPath -ArgumentList @("-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000") -WorkingDirectory (Join-Path $projectRoot "backend") -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $runtimeDir "backend.log") -RedirectStandardError (Join-Path $runtimeDir "backend-error.log")
 
+# AI models can take several seconds to load. Do not start a frontend that will
+# immediately proxy database requests until the backend health check succeeds.
+$backendReady = $false
+for ($attempt = 0; $attempt -lt 180; $attempt++) {
+    if ($backend.HasExited) { throw "後端 API 啟動失敗，請查看 .runtime/backend-error.log。" }
+    if (Test-ServiceUrl "http://127.0.0.1:8000/health") {
+        $backendReady = $true
+        break
+    }
+    Start-Sleep -Milliseconds 500
+}
+if (-not $backendReady) {
+    Stop-Process -Id $backend.Id -Force -ErrorAction SilentlyContinue
+    throw "後端 API 啟動逾時，請查看 .runtime/backend-error.log。"
+}
+
 $nodePath = (Get-Command node -ErrorAction Stop).Source
 $env:NEXT_PUBLIC_API_URL = ""
 $env:BACKEND_INTERNAL_URL = "http://127.0.0.1:8000"

@@ -4,7 +4,7 @@ import json
 import httpx
 
 from app.core.config import Settings
-from app.schemas.reports import ItemAttributes
+from app.schemas.reports import ItemAttributes, ItemClassification
 
 
 class OllamaService:
@@ -14,40 +14,161 @@ class OllamaService:
         self.settings = settings
 
     async def extract_item(
-        self, description: str, image_bytes: bytes | None = None
+        self,
+        description: str,
+        image_bytes: bytes | None = None,
+        correction_context: list[str] | None = None,
     ) -> ItemAttributes:
+        classification = await self.classify_item(
+            description, image_bytes, correction_context
+        )
+        return await self.extract_item_details(
+            description, classification, image_bytes, correction_context
+        )
+
+    async def classify_item(
+        self,
+        description: str,
+        image_bytes: bytes | None = None,
+        correction_context: list[str] | None = None,
+    ) -> ItemClassification:
         categories = (
             "earphones, phone, wallet, keys, card, umbrella, drink, bottle, "
-            "bag, laptop, mouse, glasses, charger, book, clothing, other"
+            "bag, laptop, mouse, glasses, charger, book, clothing, foam_roller, "
+            "toiletries, stationery, watch, jewelry, shoes, helmet, ball, toy, personal_item"
         )
         prompt = (
-            "請從使用者文字與照片抽取失物特徵。category 必須使用以下英文值之一："
-            f"{categories}。color 使用簡短英文顏色；brand 不確定時為 null；"
-            "distinctive_features 使用繁體中文列出形狀、圖案、貼紙、文字、刮痕、"
-            "品牌標誌、材質、表面紋理、大小、開合方式、邊角、保護殼、掛飾或配件等"
-            "可見特色；只要照片足以判斷，請盡量列出至少 2 項彼此不同且適合比對的特色。"
+            "這是第一階段，只判斷照片中使用者要登記的主要物品類別，不要描述外觀。"
+            "category 必須使用以下英文值之一："
+            f"{categories}。若物品不屬於清單，category 必須直接填 2 到 12 字的繁體中文物品名稱，"
+            "例如計算機、樂器盒或運動器材；只有真的無法辨識物品名稱時才可使用 personal_item，禁止輸出 other。"
+            "recognition_confidence 填 0 到 1；背景複雜、有多個主要物品、被遮擋或模糊時必須低於 0.68。"
+            "item_name_candidates 依可能性列出最多 3 個完整繁體中文物品名稱。"
+            "優先採用使用者明確說出的物品名稱，但不得把地點或背景物品當成主要物品。"
+            f"\n使用者文字：{description.strip() or '未提供，請以照片為主'}"
+            f"\n先前檢查問題：{'；'.join(correction_context or []) or '無'}"
+        )
+        classification = ItemClassification.model_validate(
+            json.loads(
+                await self._structured_chat(
+                    prompt,
+                    image_bytes,
+                    ItemClassification.model_json_schema(),
+                    "你是校園失物招領的物品類別判斷器，只輸出符合 schema 的 JSON。",
+                )
+            )
+        )
+        return classification
+
+    async def extract_item_details(
+        self,
+        description: str,
+        classification: ItemClassification,
+        image_bytes: bytes | None = None,
+        correction_context: list[str] | None = None,
+    ) -> ItemAttributes:
+        prompt = (
+            "這是第二階段。主要物品類別已由第一階段決定，請只針對該類別抽取可核對的外觀。"
+            f"category 必須固定為：{classification.category or 'personal_item'}，不可改成背景物品。"
+            "color 使用主要物品的簡短英文主色；brand 不確定時為 null；"
+            "distinctive_features 使用繁體中文列出 3 到 6 項彼此不同、可由照片核對的具體特色，"
+            "優先描述形狀、圖案、貼紙、可見文字、刮痕、材質、表面紋理、大小、開合方式、"
+            "邊角、保護殼、掛飾、配件及其所在位置。每項應說明具體外觀，例如「充電盒為圓角矩形」"
+            "或「盒蓋正面有白色刮痕」，不要只填單獨的顏色、品牌或物品類別，"
+            "也不要用「有文字」「有標誌」等無法區分物品的籠統描述；看不清楚時寧可少列，禁止猜測。"
+            "feature_confidences 必須用 distinctive_features 的完整文字作為鍵，逐項填入 0 到 1；"
+            "清楚可見可填 0.8 以上，需推測或看不清楚必須低於 0.68。"
+            "只辨識主要物品本身，忽略桌面、櫃子、包裝罐及其他背景物品上的文字與特徵。"
+            "照片中沒有尺、容量標示或使用者明確說明時，禁止猜測公分、毫升等精確尺寸或容量。"
             "normalized_description 請用自然繁體中文完整描述物品、顏色、材質與主要特色。"
+            f"recognition_confidence 固定採用第一階段分數 {classification.recognition_confidence if classification.recognition_confidence is not None else 0.5}。"
+            "item_name_candidates 請依可能性列出最多 3 個簡短、完整的繁體中文物品名稱，不要輸出 other。"
+            "visible_text 只能逐項填入照片中確實看得到的品牌、型號或文字；看不清楚就留空，禁止猜測。"
+            "visible_text 只能來自主要物品表面，背景物品上的文字必須忽略。"
             "不得捏造看不到或沒有提供的資訊。"
             f"\n使用者文字：{description.strip() or '未提供，請以照片為主'}"
+            f"\n第一階段候選：{'、'.join(classification.item_name_candidates) or '無'}"
+            f"\n先前檢查問題：{'；'.join(correction_context or []) or '無'}"
         )
+        content = await self._structured_chat(
+            prompt,
+            image_bytes,
+            ItemAttributes.model_json_schema(),
+            "你是校園失物招領的類別專屬特徵抽取器，只輸出符合 schema 的 JSON。",
+        )
+        attributes = ItemAttributes.model_validate(json.loads(content))
+        attributes.category = classification.category
+        attributes.recognition_confidence = classification.recognition_confidence
+        if not attributes.item_name_candidates:
+            attributes.item_name_candidates = classification.item_name_candidates
+        if not attributes.normalized_description.strip():
+            attributes.normalized_description = description.strip()
+        return attributes
+
+    async def _structured_chat(
+        self,
+        prompt: str,
+        image_bytes: bytes | None,
+        response_format: dict,
+        system_prompt: str,
+    ) -> str:
         user_message: dict[str, object] = {"role": "user", "content": prompt}
         if image_bytes:
             user_message["images"] = [base64.b64encode(image_bytes).decode("ascii")]
+        return await self._chat(
+            [
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                },
+                user_message,
+            ],
+            response_format=response_format,
+            temperature=0,
+        )
+
+    async def refine_item_candidates(
+        self,
+        brand: str | None,
+        visible_text: list[str],
+        current_candidates: list[str],
+        web_evidence: list[str],
+    ) -> list[str]:
         content = await self._chat(
             [
                 {
                     "role": "system",
-                    "content": "你是校園失物招領的結構化資料抽取器，只輸出符合 schema 的 JSON。",
+                    "content": (
+                        "你是物品名稱校對器。只能依品牌、照片可見文字、既有候選與 Wikimedia 文字摘要，"
+                        "列出最多 3 個適合失物招領的繁體中文完整物品名稱。品牌維持原文；"
+                        "不要猜型號、不要輸出 other，也不要加入解釋。"
+                    ),
                 },
-                user_message,
+                {
+                    "role": "user",
+                    "content": (
+                        f"品牌：{brand or '無'}\n"
+                        f"照片可見文字：{'、'.join(visible_text) or '無'}\n"
+                        f"既有候選：{'、'.join(current_candidates) or '無'}\n"
+                        f"Wikimedia 摘要：{' | '.join(web_evidence) or '無'}"
+                    ),
+                },
             ],
-            response_format=ItemAttributes.model_json_schema(),
+            response_format={
+                "type": "object",
+                "properties": {
+                    "candidates": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 3,
+                    }
+                },
+                "required": ["candidates"],
+            },
             temperature=0,
         )
-        attributes = ItemAttributes.model_validate(json.loads(content))
-        if not attributes.normalized_description.strip():
-            attributes.normalized_description = description.strip()
-        return attributes
+        values = json.loads(content).get("candidates", [])
+        return [str(value).strip() for value in values if str(value).strip()][:3]
 
     async def general_chat(
         self,

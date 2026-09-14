@@ -26,9 +26,10 @@ async function forward(request: NextRequest, method: "PATCH" | "DELETE") {
     !isStatusUpdate &&
     (typeof payload.description !== "string" || !payload.description.trim())
   ) return Response.json({ detail: "Description or status is required" }, { status: 422 });
-  const response = await fetch(
-    `${backend}/api/v1/admin/reports/${encodeURIComponent(payload.id)}${isStatusUpdate ? "/status" : ""}`,
-    {
+  try {
+    const response = await fetch(
+      `${backend}/api/v1/admin/reports/${encodeURIComponent(payload.id)}${isStatusUpdate ? "/status" : ""}`,
+      {
       method,
       headers: {
         "X-Admin-Key": key,
@@ -52,14 +53,20 @@ async function forward(request: NextRequest, method: "PATCH" | "DELETE") {
           )
         : undefined,
       cache: "no-store",
-    },
-  );
-  return new Response(response.body, {
-    status: response.status,
-    headers: response.status === 204
-      ? {}
-      : { "Content-Type": response.headers.get("content-type") ?? "application/json" },
-  });
+      },
+    );
+    return new Response(response.body, {
+      status: response.status,
+      headers: response.status === 204
+        ? {}
+        : { "Content-Type": response.headers.get("content-type") ?? "application/json" },
+    });
+  } catch {
+    return Response.json(
+      { detail: "LostLink 後端尚未就緒，請稍後再試" },
+      { status: 503 },
+    );
+  }
 }
 
 export async function GET(request: NextRequest) {
@@ -68,17 +75,21 @@ export async function GET(request: NextRequest) {
   if (!key) return Response.json({ detail: "Admin key is not configured" }, { status: 503 });
   const id = request.nextUrl.searchParams.get("image") ?? "";
   if (!idPattern.test(id)) return Response.json({ detail: "Invalid report ID" }, { status: 422 });
-  const response = await fetch(`${backend}/api/v1/admin/reports/${encodeURIComponent(id)}/image`, {
-    headers: { "X-Admin-Key": key },
-    cache: "no-store",
-  });
-  return new Response(response.body, {
-    status: response.status,
-    headers: {
-      "Content-Type": response.headers.get("content-type") ?? "application/octet-stream",
-      "Cache-Control": "private, max-age=300",
-    },
-  });
+  try {
+    const response = await fetch(`${backend}/api/v1/admin/reports/${encodeURIComponent(id)}/image`, {
+      headers: { "X-Admin-Key": key },
+      cache: "no-store",
+    });
+    return new Response(response.body, {
+      status: response.status,
+      headers: {
+        "Content-Type": response.headers.get("content-type") ?? "application/octet-stream",
+        "Cache-Control": "private, max-age=300",
+      },
+    });
+  } catch {
+    return Response.json({ detail: "LostLink 後端尚未就緒" }, { status: 503 });
+  }
 }
 
 export async function PATCH(request: NextRequest) {

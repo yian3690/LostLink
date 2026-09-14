@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "gemma3:4b"
     ollama_timeout_seconds: float = 90
+    item_confirmation_threshold: float = 0.68
+    item_web_lookup_enabled: bool = False
+    item_web_lookup_timeout_seconds: float = 6
+    item_web_lookup_user_agent: str = (
+        "LostLink-AI/0.1 (https://github.com/yian3690/LostLink; contact via repository)"
+    )
     e5_model: str = "intfloat/multilingual-e5-base"
     siglip_model: str = "google/siglip2-base-patch16-256"
 

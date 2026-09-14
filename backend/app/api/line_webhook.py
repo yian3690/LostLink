@@ -12,7 +12,13 @@ from app.core.config import Settings, get_settings
 from app.core.database import get_session
 from app.models.entities import ItemReport, User
 from app.schemas.reports import ReportCreate
-from app.services.ai import CATEGORY_ZH, COLOR_ZH
+from app.services.ai import (
+    COLOR_TERMS,
+    COLOR_ZH,
+    category_name_zh,
+    item_confirmation_candidates,
+    needs_item_confirmation,
+)
 from app.services.line import (
     LineClient,
     build_match_messages,
@@ -34,6 +40,8 @@ _pending_intents: dict[str, tuple[float, str, str]] = {}
 _active_modes: dict[str, tuple[float, str]] = {}
 _chat_histories: dict[str, tuple[float, list[dict[str, str]]]] = {}
 _recent_searches: dict[str, tuple[float, str]] = {}
+_processed_events: dict[str, tuple[float, str]] = {}
+_pending_item_confirmations: dict[str, tuple[float, dict[str, object]]] = {}
 
 
 def _cleanup_pending() -> None:
@@ -44,6 +52,8 @@ def _cleanup_pending() -> None:
         _active_modes,
         _chat_histories,
         _recent_searches,
+        _processed_events,
+        _pending_item_confirmations,
     ):
         expired = [key for key, value in storage.items() if value[0] < cutoff]
         for key in expired:
@@ -85,6 +95,35 @@ def _store_pending_intent(line_user_id: str, kind: str, description: str) -> Non
     _pending_intents[line_user_id] = (time.monotonic(), kind, description)
 
 
+def _store_item_confirmation(
+    line_user_id: str,
+    next_mode: str,
+    description: str,
+    candidates: list[str],
+    brand: str | None = None,
+    visible_text: list[str] | None = None,
+) -> None:
+    _cleanup_pending()
+    _pending_item_confirmations[line_user_id] = (
+        time.monotonic(),
+        {
+            "next_mode": next_mode,
+            "description": description,
+            "candidates": candidates[:3],
+            "brand": brand,
+            "visible_text": (visible_text or [])[:5],
+        },
+    )
+
+
+def _take_item_confirmation(line_user_id: str | None) -> dict[str, object] | None:
+    _cleanup_pending()
+    if not line_user_id:
+        return None
+    value = _pending_item_confirmations.pop(line_user_id, None)
+    return value[1] if value else None
+
+
 def _take_pending_intent(line_user_id: str | None) -> tuple[str, str] | None:
     _cleanup_pending()
     if not line_user_id:
@@ -112,6 +151,7 @@ def _clear_active_mode(line_user_id: str | None) -> None:
     _active_modes.pop(line_user_id, None)
     _pending_intents.pop(line_user_id, None)
     _pending_images.pop(line_user_id, None)
+    _pending_item_confirmations.pop(line_user_id, None)
 
 
 def _chat_history(line_user_id: str) -> list[dict[str, str]]:
@@ -129,6 +169,18 @@ def _save_chat_turn(line_user_id: str, user_text: str, assistant_text: str) -> N
         ]
     )
     _chat_histories[line_user_id] = (time.monotonic(), history[-8:])
+
+
+def _is_duplicate_event(event: dict) -> bool:
+    """Return True only for an actual LINE redelivery of webhookEventId."""
+    _cleanup_pending()
+    event_key = str(event.get("webhookEventId") or "")
+    if not event_key:
+        return False
+    if event_key in _processed_events:
+        return True
+    _processed_events[event_key] = (time.monotonic(), "processed")
+    return False
 
 
 def _mode_menu_message(text: str = "請先選擇你要辦理的項目：") -> list[dict]:
@@ -211,6 +263,46 @@ def _photo_role_intent_message(summary: str) -> list[dict]:
     ]
 
 
+def _item_name_confirmation_message(
+    candidates: list[str],
+    brand: str | None = None,
+    visible_text: list[str] | None = None,
+) -> list[dict]:
+    clues = list(dict.fromkeys(value for value in [brand, *(visible_text or [])] if value))
+    clue_text = f"我只確認到照片文字／品牌：{'、'.join(clues[:3])}。\n" if clues else ""
+    choices = [
+        {
+            "type": "action",
+            "action": {
+                "type": "postback",
+                "label": name[:20],
+                "data": f"action=confirm_item:{index}",
+                "displayText": f"這是{name}",
+            },
+        }
+        for index, name in enumerate(candidates[:3])
+    ]
+    choices.append(
+        {
+            "type": "action",
+            "action": {
+                "type": "postback",
+                "label": "都不是／自行輸入",
+                "data": "action=item_name_other",
+                "displayText": "候選都不是，我要自行輸入",
+            },
+        }
+    )
+    return [{
+        "type": "text",
+        "text": (
+            "我對照片中的物品名稱還不夠確定，因此尚未建立案件或更新 AI 特徵。\n"
+            f"{clue_text}請先選擇正確名稱；若都不對，可以自行輸入。"
+        ),
+        "quickReply": {"items": choices},
+    }]
+
+
 def _found_time_confirmation_message() -> list[dict]:
     return [
         {
@@ -244,7 +336,7 @@ def _tracking_missing_fields(description: str, has_image: bool) -> list[str]:
     missing: list[str] = []
     if ReportService._is_generic_item_query(description) and not has_image:
         missing.append("物品名稱、顏色或照片")
-    if not extract_location(description) and not any(
+    if not _latest_tracking_location(description) and not any(
         term in description for term in ("地點不確定", "不知道地點", "地點不知道")
     ):
         missing.append("遺失地點")
@@ -253,6 +345,54 @@ def _tracking_missing_fields(description: str, has_image: bool) -> list[str]:
     ):
         missing.append("大約遺失時間")
     return missing
+
+
+def _latest_tracking_location(description: str) -> str | None:
+    parts = [value.strip() for value in description.split("；") if value.strip()]
+    for part in reversed(parts):
+        location = extract_location(part)
+        if location:
+            return location
+    return extract_location(description)
+
+
+def _latest_tracking_time(description: str):
+    parts = [value.strip() for value in description.split("；") if value.strip()]
+    for part in reversed(parts):
+        time_hint = extract_time_hint(part)
+        if time_hint:
+            return time_hint
+    return extract_time_hint(description)
+
+
+def _merge_tracking_clue(previous: str, clue: str) -> str:
+    """Merge an answer while replacing older location/time-only answers."""
+    incoming = clue.strip()
+    if not incoming:
+        return previous
+    new_location = bool(extract_location(incoming)) or any(
+        term in incoming for term in ("地點不確定", "不知道地點", "地點不知道")
+    )
+    new_time = bool(extract_time_hint(incoming)) or any(
+        term in incoming for term in ("時間不確定", "不知道時間", "時間不知道")
+    )
+    kept: list[str] = []
+    for part in [value.strip() for value in previous.split("；") if value.strip()]:
+        has_item = ReportService._contains_specific_item(part)
+        old_location_only = bool(extract_location(part)) and not has_item
+        old_time_only = bool(extract_time_hint(part)) and not has_item
+        old_unknown_location = any(
+            term in part for term in ("地點不確定", "不知道地點", "地點不知道")
+        )
+        old_unknown_time = any(
+            term in part for term in ("時間不確定", "不知道時間", "時間不知道")
+        )
+        if new_location and (old_location_only or old_unknown_location):
+            continue
+        if new_time and (old_time_only or old_unknown_time):
+            continue
+        kept.append(part)
+    return "；".join(dict.fromkeys([*kept, incoming]))
 
 
 def _tracking_details_message(missing: list[str], has_image: bool) -> list[dict]:
@@ -270,17 +410,38 @@ def _tracking_details_message(missing: list[str], has_image: bool) -> list[dict]
 
 
 def _tracking_confirmation_message(description: str) -> list[dict]:
-    time_hint = extract_time_hint(description)
-    location = extract_location(description) or "未提供"
-    occurred = time_hint[0].strftime("%Y/%m/%d %H:%M") if time_hint else "未提供"
-    summary = description[:220]
+    time_hint = _latest_tracking_time(description)
+    location = _latest_tracking_location(description)
+    location_unknown = any(term in description for term in ("地點不確定", "不知道地點", "地點不知道"))
+    time_unknown = any(term in description for term in ("時間不確定", "不知道時間", "時間不知道"))
+    location_text = location or ("不確定" if location_unknown else "未提供")
+    occurred = time_hint[0].strftime("%Y/%m/%d %H:%M") if time_hint else ("不確定" if time_unknown else "未提供")
+    item_parts = [
+        part for part in description.split("；")
+        if ReportService._contains_specific_item(part) or not (extract_location(part) or extract_time_hint(part))
+    ]
+    item_parts = [
+        part for part in item_parts
+        if not any(
+            term in part
+            for term in (
+                "地點不確定",
+                "不知道地點",
+                "地點不知道",
+                "時間不確定",
+                "不知道時間",
+                "時間不知道",
+            )
+        )
+    ]
+    summary = "；".join(dict.fromkeys(item_parts))[:220] or description[:220]
     return [
         {
             "type": "text",
             "text": (
                 "請確認持續協尋資料：\n"
                 f"物品與特徵：{summary}\n"
-                f"遺失地點：{location}\n"
+                f"遺失地點：{location_text}\n"
                 f"遺失時間：{occurred}\n"
                 "確認後才會建立案件並持續比對新的拾獲物。"
             ),
@@ -293,6 +454,73 @@ def _tracking_confirmation_message(description: str) -> list[dict]:
             },
         }
     ]
+
+
+async def _resume_after_item_confirmation(
+    request: Request,
+    session: AsyncSession,
+    service: ReportService,
+    line_user_id: str,
+    state: dict[str, object],
+    image: bytes,
+    confirmed_name: str,
+) -> list[dict]:
+    previous = str(state.get("description") or "").strip()
+    confirmed_description = "；".join(
+        dict.fromkeys(
+            value
+            for value in (previous, f"使用者確認物品名稱：{confirmed_name.strip()}")
+            if value
+        )
+    )
+    next_mode = str(state.get("next_mode") or "photo")
+
+    if next_mode in {"tracking", "tracking_confirm"}:
+        _store_pending_intent(line_user_id, "lost", confirmed_description)
+        _store_pending_image(line_user_id, image)
+        missing = _tracking_missing_fields(confirmed_description, True)
+        if missing:
+            _store_active_mode(line_user_id, "tracking")
+            return _tracking_details_message(missing, True)
+        _store_active_mode(line_user_id, "tracking_confirm")
+        return _tracking_confirmation_message(confirmed_description)
+
+    if next_mode == "lost":
+        _store_pending_intent(line_user_id, "lost", confirmed_description)
+        _store_pending_image(line_user_id, image)
+        _store_active_mode(line_user_id, "lost")
+        return _lost_photo_intent_message(confirmed_description)
+
+    if next_mode == "found":
+        location = extract_location(confirmed_description)
+        found_time = extract_time_hint(confirmed_description)
+        if not location:
+            _store_pending_intent(line_user_id, "found", confirmed_description)
+            _store_pending_image(line_user_id, image)
+            _store_active_mode(line_user_id, "found")
+            return [{"type": "text", "text": f"已確認這是「{confirmed_name}」。請再告訴我撿到地點與時間，確認完整後才會建立案件。"}]
+        if not found_time:
+            _store_pending_intent(line_user_id, "found", confirmed_description)
+            _store_pending_image(line_user_id, image)
+            _store_active_mode(line_user_id, "found")
+            return _found_time_confirmation_message()
+        report, matches = await service.create(
+            ReportCreate(
+                kind="found",
+                description=confirmed_description,
+                location=location,
+                occurred_at=found_time[0],
+                line_user_id=line_user_id,
+                image_base64=base64.b64encode(image).decode("ascii"),
+            )
+        )
+        _clear_active_mode(line_user_id)
+        return await _found_registered_messages(request, session, report, matches)
+
+    _store_pending_intent(line_user_id, "photo", confirmed_description)
+    _store_pending_image(line_user_id, image)
+    _store_active_mode(line_user_id, "chat")
+    return _photo_role_intent_message(confirmed_description)
 
 
 async def _found_registered_messages(
@@ -372,10 +600,28 @@ def _is_list_request(text: str) -> bool:
 
 def _is_search_follow_up(line_user_id: str | None, text: str) -> bool:
     _cleanup_pending()
-    if not line_user_id or line_user_id not in _recent_searches:
+    if not line_user_id:
         return False
     normalized = text.strip()
-    return len(normalized) <= 20 and normalized.endswith(("呢", "嗎", "？", "?"))
+    if len(normalized) > 40:
+        return False
+    if line_user_id in _recent_searches and normalized.endswith(("呢", "嗎", "？", "?")):
+        return True
+    pending = _pending_intents.get(line_user_id)
+    has_pending_lost_search = bool(pending and pending[1] == "lost")
+    if not has_pending_lost_search:
+        return False
+    has_color = any(
+        term.casefold() in normalized.casefold()
+        for terms in COLOR_TERMS.values()
+        for term in terms
+    )
+    return bool(
+        has_color
+        or ReportService._contains_specific_item(normalized)
+        or extract_location(normalized)
+        or extract_time_hint(normalized)
+    )
 
 
 def _is_complete_item_search(service: ReportService, text: str) -> bool:
@@ -589,6 +835,8 @@ async def line_webhook(
     payload = json.loads(body or b"{}")
     service = ReportService(session, settings)
     for event in payload.get("events", []):
+        if _is_duplicate_event(event):
+            continue
         event_type = event.get("type")
         source = event.get("source", {})
         line_user_id = source.get("userId")
@@ -607,11 +855,50 @@ async def line_webhook(
                 "action=photo_lost",
                 "action=confirm_found_now",
                 "action=provide_found_time",
-            }:
+                "action=item_name_other",
+            } and not action.startswith("action=confirm_item:"):
                 await client.reply(reply_token, _mode_menu_message())
                 continue
             if not line_user_id:
                 await client.reply(reply_token, "無法取得 LINE 使用者資料，請重新開啟聊天室後再試。")
+                continue
+            if action == "action=item_name_other":
+                state = _take_item_confirmation(line_user_id)
+                image = _take_pending_image(line_user_id)
+                if not state or not image:
+                    await client.reply(reply_token, "找不到剛才的照片辨識結果，請重新傳送照片。")
+                    continue
+                _store_item_confirmation(
+                    line_user_id,
+                    str(state.get("next_mode") or "photo"),
+                    str(state.get("description") or ""),
+                    [str(value) for value in state.get("candidates", [])],
+                    str(state.get("brand") or "") or None,
+                    [str(value) for value in state.get("visible_text", [])],
+                )
+                _store_pending_image(line_user_id, image)
+                _store_active_mode(line_user_id, "item_name_input")
+                await client.reply(reply_token, "請直接輸入這件物品的完整名稱，例如「按摩滾筒」或「CeraVe 乳液」。收到後我會再讓你確認案件資料。")
+                continue
+            if action.startswith("action=confirm_item:"):
+                state = _take_item_confirmation(line_user_id)
+                image = _take_pending_image(line_user_id)
+                try:
+                    choice_index = int(action.rsplit(":", 1)[1])
+                    candidates = [str(value) for value in (state or {}).get("candidates", [])]
+                    confirmed_name = candidates[choice_index]
+                except (ValueError, IndexError):
+                    state = None
+                    confirmed_name = ""
+                if not state or not image or not confirmed_name:
+                    await client.reply(reply_token, "找不到剛才的候選項目，請重新傳送照片。")
+                    continue
+                await client.reply(
+                    reply_token,
+                    await _resume_after_item_confirmation(
+                        request, session, service, line_user_id, state, image, confirmed_name
+                    ),
+                )
                 continue
             if action == "action=continue_chat":
                 _clear_active_mode(line_user_id)
@@ -709,12 +996,12 @@ async def line_webhook(
                     _store_active_mode(line_user_id, "tracking")
                     await client.reply(reply_token, _tracking_details_message(missing, bool(pending_image)))
                     continue
-                time_hint = extract_time_hint(description)
+                time_hint = _latest_tracking_time(description)
                 report, matches = await service.create(
                     ReportCreate(
                         kind="lost",
                         description=description,
-                        location=extract_location(description),
+                        location=_latest_tracking_location(description),
                         occurred_at=time_hint[0] if time_hint else None,
                         line_user_id=line_user_id,
                         image_base64=(
@@ -784,6 +1071,32 @@ async def line_webhook(
 
         if message.get("type") == "text":
             raw_text = message.get("text", "").strip()
+            if _get_active_mode(line_user_id) == "item_name_input":
+                state = _take_item_confirmation(line_user_id)
+                image = _take_pending_image(line_user_id)
+                if not state or not image:
+                    _clear_active_mode(line_user_id)
+                    await client.reply(reply_token, "剛才的照片辨識已逾時，請重新傳送照片。")
+                    continue
+                if _generic_description(raw_text) or len(raw_text) > 40:
+                    _store_item_confirmation(
+                        line_user_id,
+                        str(state.get("next_mode") or "photo"),
+                        str(state.get("description") or ""),
+                        [str(value) for value in state.get("candidates", [])],
+                        str(state.get("brand") or "") or None,
+                        [str(value) for value in state.get("visible_text", [])],
+                    )
+                    _store_pending_image(line_user_id, image)
+                    await client.reply(reply_token, "請輸入 2～40 字的具體物品名稱，例如「黑色按摩滾筒」，不要只寫「東西」。")
+                    continue
+                await client.reply(
+                    reply_token,
+                    await _resume_after_item_confirmation(
+                        request, session, service, line_user_id, state, image, raw_text
+                    ),
+                )
+                continue
             if _is_chat_control(raw_text):
                 if line_user_id:
                     _clear_active_mode(line_user_id)
@@ -814,9 +1127,7 @@ async def line_webhook(
                     else ""
                 )
                 pending_image = _take_pending_image(line_user_id)
-                combined = "；".join(
-                    dict.fromkeys(value for value in (previous, raw_text) if value)
-                )
+                combined = _merge_tracking_clue(previous, raw_text)
                 _store_pending_intent(line_user_id, "lost", combined)
                 if pending_image:
                     _store_pending_image(line_user_id, pending_image)
@@ -1033,7 +1344,7 @@ async def line_webhook(
                     visual_summary = "".join(
                         (
                             COLOR_ZH.get(attributes.color or "", ""),
-                            CATEGORY_ZH.get(attributes.category or "", "物品"),
+                            category_name_zh(attributes.category),
                         )
                     )
                     analyzed_description = f"AI 圖像辨識：{visual_summary}"
@@ -1041,6 +1352,30 @@ async def line_webhook(
                     analyzed_description = "；".join(
                         dict.fromkeys((pending_description, analyzed_description))
                     )
+                if needs_item_confirmation(
+                    attributes,
+                    pending_description,
+                    True,
+                    settings.item_confirmation_threshold,
+                ):
+                    candidates = item_confirmation_candidates(attributes)
+                    _store_item_confirmation(
+                        line_user_id,
+                        mode or "photo",
+                        analyzed_description,
+                        candidates,
+                        attributes.brand,
+                        attributes.visible_text,
+                    )
+                    _store_pending_image(line_user_id, image)
+                    _store_active_mode(line_user_id, "item_confirm")
+                    await client.reply(
+                        reply_token,
+                        _item_name_confirmation_message(
+                            candidates, attributes.brand, attributes.visible_text
+                        ),
+                    )
+                    continue
                 if mode in {"tracking", "tracking_confirm"}:
                     _store_pending_intent(line_user_id, "lost", analyzed_description)
                     _store_pending_image(line_user_id, image)
@@ -1083,11 +1418,35 @@ async def line_webhook(
                 continue
             kind, description = pending_intent
             pending_location = extract_location(description)
+            attributes = await service.analyzer.analyze(description, image)
+            if needs_item_confirmation(
+                attributes,
+                description,
+                True,
+                settings.item_confirmation_threshold,
+            ):
+                analyzed_description = attributes.normalized_description or description
+                candidates = item_confirmation_candidates(attributes)
+                _store_item_confirmation(
+                    line_user_id,
+                    kind,
+                    analyzed_description,
+                    candidates,
+                    attributes.brand,
+                    attributes.visible_text,
+                )
+                _store_pending_image(line_user_id, image)
+                _store_active_mode(line_user_id, "item_confirm")
+                await client.reply(
+                    reply_token,
+                    _item_name_confirmation_message(
+                        candidates, attributes.brand, attributes.visible_text
+                    ),
+                )
+                continue
             if _generic_description(description):
-                description = (
-                    "拾獲者上傳的物品照片"
-                    if kind == "found"
-                    else "使用者上傳的遺失物照片"
+                description = attributes.normalized_description or (
+                    "拾獲者上傳的物品照片" if kind == "found" else "使用者上傳的遺失物照片"
                 )
             found_time = extract_time_hint(description)
             if kind == "found" and not found_time:

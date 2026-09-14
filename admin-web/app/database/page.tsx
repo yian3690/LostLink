@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { categoryLabel, colorLabel } from "../lib/itemLabels";
 import styles from "./database.module.css";
 
 type Report = {
@@ -12,6 +13,7 @@ type Report = {
   brand: string | null;
   color: string | null;
   distinctive_features: string[];
+  feature_confidences: Record<string, number>;
   location: string | null;
   occurred_at: string | null;
   created_at: string;
@@ -55,6 +57,8 @@ export default function DatabasePage() {
   const [editingColor, setEditingColor] = useState("");
   const [editingFeatures, setEditingFeatures] = useState("");
   const [photoReport, setPhotoReport] = useState<Report | null>(null);
+  const [deleteReportTarget, setDeleteReportTarget] = useState<Report | null>(null);
+  const [deletePageOpen, setDeletePageOpen] = useState(false);
   const [kind, setKind] = useState<"lost" | "found">("found");
   const [description, setDescription] = useState("");
   const [location, setLocation] = useState("");
@@ -89,7 +93,7 @@ export default function DatabasePage() {
       if (kindFilter !== "all" && report.kind !== kindFilter) return false;
       if (statusFilter !== "all" && report.status !== statusFilter) return false;
       if (!needle) return true;
-      return [report.id, report.description, report.location, report.category, report.color]
+      return [report.id, report.description, report.location, report.category, report.color, categoryLabel(report.category, report.description), colorLabel(report.color)]
         .filter(Boolean)
         .some((value) => String(value).toLocaleLowerCase().includes(needle));
     });
@@ -165,9 +169,9 @@ export default function DatabasePage() {
     setEditingDescription(report.description);
     setEditingLocation(report.location ?? "");
     setEditingOccurredAt(toDateTimeInput(report.occurred_at));
-    setEditingCategory(report.category ?? "");
+    setEditingCategory(categoryLabel(report.category, report.description));
     setEditingBrand(report.brand ?? "");
-    setEditingColor(report.color ?? "");
+    setEditingColor(colorLabel(report.color));
     setEditingFeatures(report.distinctive_features.join("、"));
     setError("");
   };
@@ -202,10 +206,7 @@ export default function DatabasePage() {
   };
 
   const deleteReport = async (report: Report) => {
-    const confirmed = window.confirm(
-      `確定刪除這筆${report.kind === "found" ? "拾獲" : "遺失"}資料？\n\n${report.description}\n\n相關配對與照片也會一併刪除，無法復原。`,
-    );
-    if (!confirmed) return;
+    setDeleteReportTarget(null);
     setLoading(true);
     const response = await fetch("/api/database/reports/manage", {
       method: "DELETE",
@@ -217,6 +218,37 @@ export default function DatabasePage() {
       await refresh();
     } else {
       setError("刪除失敗"); setLoading(false);
+    }
+  };
+
+  const deleteCurrentPage = async () => {
+    const targets = [...pagedReports];
+    if (targets.length === 0) return;
+    setDeletePageOpen(false);
+    setLoading(true);
+    setError("");
+    setNotice("");
+    let deleted = 0;
+    for (const report of targets) {
+      try {
+        const response = await fetch("/api/database/reports/manage", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: report.id }),
+        });
+        if (response.ok) deleted += 1;
+      } catch {
+        // Continue with the remaining records and summarize partial failures.
+      }
+    }
+
+    setEditingId(null);
+    setPhotoReport(null);
+    await refresh();
+    if (deleted === targets.length) {
+      setNotice(`第 ${safePage} 頁的 ${deleted} 筆資料、照片與關聯配對已刪除。`);
+    } else {
+      setError(`刪除未完全成功：已刪除 ${deleted} 筆，失敗 ${targets.length - deleted} 筆。請重新整理後再試。`);
     }
   };
 
@@ -285,6 +317,13 @@ export default function DatabasePage() {
             <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}>
               <option value="all">全部狀態</option><option value="open">待認領</option><option value="returned">已認領</option>
             </select>
+            <button
+              className={styles.deletePage}
+              disabled={loading || pagedReports.length === 0}
+              onClick={() => setDeletePageOpen(true)}
+            >
+              刪除本頁（{pagedReports.length}）
+            </button>
           </div>
         </div>
         <div className={styles.tableWrap}>
@@ -306,14 +345,14 @@ export default function DatabasePage() {
                   <td className={styles.aiFeatures}>
                     {editingId === report.id ? (
                       <div className={styles.featureEditor}>
-                        <input value={editingCategory} onChange={(event) => setEditingCategory(event.target.value)} placeholder="類別，如 bottle" />
-                        <input value={editingColor} onChange={(event) => setEditingColor(event.target.value)} placeholder="顏色，如 black" />
+                        <input value={editingCategory} onChange={(event) => setEditingCategory(event.target.value)} placeholder="類別，如水壺、按摩滾筒" />
+                        <input value={editingColor} onChange={(event) => setEditingColor(event.target.value)} placeholder="顏色，如黑色、透明" />
                         <input value={editingBrand} onChange={(event) => setEditingBrand(event.target.value)} placeholder="品牌（選填）" />
                         <textarea value={editingFeatures} onChange={(event) => setEditingFeatures(event.target.value)} placeholder="特徵，以頓號或換行分隔" />
                         <small>請填寫照片中能確認的客觀特徵；儲存後會重建向量與配對。</small>
                       </div>
                     ) : (
-                      <><strong>{[report.color, report.category].filter(Boolean).join(" · ") || "待辨識"}</strong>{report.brand && <span>品牌：{report.brand}</span>}{report.distinctive_features.length > 0 && <span>{report.distinctive_features.join("、")}</span>}</>
+                      <><strong>{[colorLabel(report.color), categoryLabel(report.category, report.description)].filter(Boolean).join(" · ")}</strong>{report.brand && <span>品牌：{report.brand}</span>}{report.distinctive_features.length > 0 && <span className={styles.featureList}>{report.distinctive_features.map((feature) => <em key={feature}>{feature}{report.feature_confidences?.[feature] != null && <small>{Math.round(report.feature_confidences[feature] * 100)}%</small>}</em>)}</span>}</>
                     )}
                   </td>
                   <td>{editingId === report.id ? <div className={styles.detailEditor}><input value={editingLocation} onChange={(event) => setEditingLocation(event.target.value)} placeholder="地點" /><input type="datetime-local" value={editingOccurredAt} onChange={(event) => setEditingOccurredAt(event.target.value)} /></div> : <><strong>{report.location || "未提供"}</strong><span>{formatDate(report.occurred_at || report.created_at)}</span></>}</td>
@@ -321,7 +360,7 @@ export default function DatabasePage() {
                     {editingId === report.id ? (
                       <><button className={styles.save} onClick={() => void saveDescription(report.id)} disabled={loading}>儲存</button><button className={styles.cancel} onClick={() => setEditingId(null)}>取消</button></>
                     ) : (
-                      <><button className={styles.edit} onClick={() => startEdit(report)}>修改描述</button>{report.kind === "found" && <button className={report.status === "returned" ? styles.reopen : styles.claimed} onClick={() => void updateStatus(report)}>{report.status === "returned" ? "恢復待認領" : "標記已領取"}</button>}<button className={styles.delete} onClick={() => void deleteReport(report)}>刪除</button></>
+                      <><button className={styles.edit} onClick={() => startEdit(report)}>修改描述</button>{report.kind === "found" && <button className={report.status === "returned" ? styles.reopen : styles.claimed} onClick={() => void updateStatus(report)}>{report.status === "returned" ? "恢復待認領" : "標記已領取"}</button>}<button className={styles.delete} onClick={() => setDeleteReportTarget(report)}>刪除</button></>
                     )}
                   </div></td>
                 </tr>
@@ -337,6 +376,68 @@ export default function DatabasePage() {
           </nav>
         )}
       </section>
+      {deleteReportTarget && (
+        <div className={styles.confirmBackdrop} onClick={() => setDeleteReportTarget(null)}>
+          <section
+            className={styles.confirmModal}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-report-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className={styles.warningIcon} aria-hidden="true">!</div>
+            <p className={styles.confirmEyebrow}>DELETE RECORD</p>
+            <h2 id="delete-report-title">刪除這筆{deleteReportTarget.kind === "found" ? "拾獲" : "遺失"}資料？</h2>
+            <p className={styles.confirmDescription}>請再次確認要刪除的案件內容。</p>
+            <div className={styles.recordPreview}>
+              <b>{deleteReportTarget.description}</b>
+              <span>{deleteReportTarget.location || "地點未提供"} · ID {deleteReportTarget.id.slice(0, 8)}</span>
+            </div>
+            <div className={styles.confirmWarning}>
+              <b>此操作無法復原</b>
+              <span>相關照片、AI 配對與案件紀錄也會一併刪除。</span>
+            </div>
+            <div className={styles.confirmActions}>
+              <button className={styles.confirmCancel} onClick={() => setDeleteReportTarget(null)}>取消</button>
+              <button className={styles.confirmDelete} onClick={() => void deleteReport(deleteReportTarget)} disabled={loading}>
+                確認刪除
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+      {deletePageOpen && (
+        <div className={styles.confirmBackdrop} onClick={() => setDeletePageOpen(false)}>
+          <section
+            className={styles.confirmModal}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-page-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className={styles.warningIcon} aria-hidden="true">!</div>
+            <p className={styles.confirmEyebrow}>DELETE PAGE</p>
+            <h2 id="delete-page-title">刪除第 {safePage} 頁資料？</h2>
+            <p className={styles.confirmDescription}>
+              將刪除目前頁面顯示的資料；其他分頁不會受到影響。
+            </p>
+            <div className={styles.confirmSummary}>
+              <span>{query.trim() || kindFilter !== "all" || statusFilter !== "all" ? "目前篩選結果" : "目前資料頁面"}</span>
+              <strong>{pagedReports.length} 筆</strong>
+            </div>
+            <div className={styles.confirmWarning}>
+              <b>此操作無法復原</b>
+              <span>相關照片、AI 配對與案件紀錄也會一併刪除。</span>
+            </div>
+            <div className={styles.confirmActions}>
+              <button className={styles.confirmCancel} onClick={() => setDeletePageOpen(false)}>取消</button>
+              <button className={styles.confirmDelete} onClick={() => void deleteCurrentPage()} disabled={loading}>
+                確認刪除 {pagedReports.length} 筆
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
       {photoReport && (
         <div className={styles.photoBackdrop} onClick={() => setPhotoReport(null)}>
           <section className={styles.photoModal} role="dialog" aria-modal="true" aria-label="物品照片預覽" onClick={(event) => event.stopPropagation()}>

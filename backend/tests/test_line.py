@@ -48,7 +48,12 @@ def test_parse_report_kind() -> None:
     assert extract_location("紫色錢包，牛皮的，在走廊撿到") == "走廊"
     assert extract_location("我在二樓樓梯間撿到雨傘") == "2F 樓梯間"
     assert extract_location("我今天在學餐有東西不見") == "學生餐廳"
+    assert extract_location("我在總圖三樓掉了耳機") == "圖書館 3F"
+    assert extract_location("在活中撿到雨傘") == "活動中心"
     assert extract_location("我在三樓有東西不見") == "3F"
+    assert extract_location("台灣大學") == "台灣大學"
+    assert extract_location("地點是台北市永和區") == "台北市永和區"
+    assert extract_location("我在台灣大學遺失按摩滾筒") == "台灣大學"
     assert location_score("學餐", "學生餐廳 1F 靠窗座位") > 0
     assert location_score("三樓", "教學大樓 3F 服務台") > 0
     assert location_score("三樓", "綜合大樓 301 教室") > 0

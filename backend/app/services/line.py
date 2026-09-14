@@ -8,6 +8,7 @@ from typing import Any, Sequence
 import httpx
 
 from app.core.config import Settings
+from app.services.locations import normalize_location_aliases
 
 
 class LineClient:
@@ -229,12 +230,8 @@ def _floor_number(value: str) -> str:
 
 def extract_location(text: str) -> str | None:
     """Extract common campus room/building locations from conversational text."""
-    normalized_text = (
-        text.replace("學餐", "學生餐廳")
-        .replace("綜大", "綜合大樓")
-        .replace("教大", "教學大樓")
-    )
-    room = re.search(r"(?i)([A-Z]{1,4}\s*-?\s*\d{2,4})\s*(教室)?", text)
+    normalized_text = normalize_location_aliases(text)
+    room = re.search(r"(?i)([A-Z]{1,4}\s*-?\s*\d{2,4})\s*(教室)?", normalized_text)
     if room:
         code = re.sub(r"[\s-]+", "", room.group(1)).upper()
         return f"{code}教室" if room.group(2) else code
@@ -268,6 +265,35 @@ def extract_location(text: str) -> str | None:
         value = re.sub(r"^(?:第)", "", re.sub(r"\s+", "", floor.group(1)))
         value = re.sub(r"(?:樓|f)$", "", value, flags=re.IGNORECASE)
         return f"{_floor_number(value)}F"
+
+    labelled = re.search(
+        r"(?:地點|位置)\s*(?:是|在|為|：|:)?\s*([^，。；;\n]{2,50})",
+        normalized_text,
+    )
+    if labelled:
+        return labelled.group(1).strip(" ，,。")
+
+    contextual = re.search(
+        r"(?:在|於)\s*([^，。；;\n]{2,50}?)(?=(?:不見|遺失|弄丟|掉了|撿到|拾獲))",
+        normalized_text,
+    )
+    if contextual:
+        return contextual.group(1).strip(" ，,。")
+
+    # Accept a short standalone place name such as「台灣大學」或「台北市永和區」.
+    # This runs after the stricter campus patterns so item descriptions are not
+    # casually mistaken for locations.
+    segments = [part.strip() for part in re.split(r"[；;\n]", normalized_text) if part.strip()]
+    for segment in reversed(segments):
+        candidate = re.sub(r"^(?:地點|位置)\s*(?:是|在|為|：|:)?\s*", "", segment)
+        candidate = re.sub(r"^(?:在|於)\s*", "", candidate)
+        candidate = re.split(r"(?:不見|遺失|弄丟|掉了|撿到|拾獲)", candidate, maxsplit=1)[0]
+        candidate = candidate.strip(" ：:，,。")
+        if 2 <= len(candidate) <= 50 and re.search(
+            r"(?:大學|學校|校區|[縣市區鄉鎮村里]|路|街|巷|館|中心|教室|大樓|宿舍|餐廳)$",
+            candidate,
+        ):
+            return candidate
     return None
 
 

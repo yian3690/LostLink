@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS item_reports (
     brand varchar(80),
     color varchar(80),
     distinctive_features jsonb NOT NULL DEFAULT '[]',
+    feature_confidences jsonb NOT NULL DEFAULT '{}',
     campus varchar(120),
     location varchar(240),
     occurred_at timestamptz,
@@ -112,4 +113,3 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     details jsonb NOT NULL DEFAULT '{}',
     created_at timestamptz NOT NULL DEFAULT now()
 );
-

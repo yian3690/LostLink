@@ -9,8 +9,9 @@ import httpx
 import numpy as np
 
 from app.core.config import Settings
-from app.schemas.reports import ItemAttributes
+from app.schemas.reports import ItemAttributes, ItemClassification
 from app.services.ollama import OllamaService
+from app.services.item_lookup import TextOnlyItemLookup
 
 
 CATEGORY_TERMS = {
@@ -24,6 +25,20 @@ CATEGORY_TERMS = {
     "bottle": ("水壺", "水杯", "保溫杯", "保溫瓶", "隨行杯", "水瓶", "瓶子"),
     "bag": ("背包", "書包", "提袋", "袋子"),
     "laptop": ("筆電", "電腦", "macbook", "notebook"),
+    "mouse": ("滑鼠", "mouse"),
+    "glasses": ("眼鏡", "墨鏡", "太陽眼鏡"),
+    "charger": ("充電器", "充電線", "傳輸線", "電源線", "變壓器"),
+    "book": ("書本", "課本", "筆記本", "講義"),
+    "clothing": ("衣服", "外套", "帽子", "圍巾", "衣物"),
+    "foam_roller": ("按摩滾筒", "泡棉滾筒", "滾筒", "按摩滾輪", "瑜珈柱", "瑜伽柱", "狼牙棒"),
+    "toiletries": ("乳液", "洗面乳", "洗髮精", "護手霜", "化妝品", "保養品"),
+    "stationery": ("鉛筆盒", "筆袋", "文具", "原子筆", "自動筆"),
+    "watch": ("手錶", "智慧手錶"),
+    "jewelry": ("項鍊", "手鍊", "戒指", "耳環", "飾品"),
+    "shoes": ("鞋子", "球鞋", "拖鞋"),
+    "helmet": ("安全帽", "頭盔"),
+    "ball": ("籃球", "排球", "足球", "球類"),
+    "toy": ("玩偶", "娃娃", "玩具"),
 }
 COLOR_TERMS = {
     "black": ("黑色", "黑", "black"),
@@ -35,6 +50,7 @@ COLOR_TERMS = {
     "pink": ("粉紅", "粉色", "pink"),
     "yellow": ("黃色", "黃", "yellow"),
     "brown": ("棕色", "咖啡色", "褐色", "brown"),
+    "beige": ("米色", "奶油色", "beige"),
     "orange": ("橘色", "橙色", "orange"),
     "purple": ("紫色", "紫", "purple"),
     "transparent": ("透明", "clear", "transparent"),
@@ -57,7 +73,16 @@ IMAGE_CATEGORY_PROMPTS = {
     "charger": "a clear photo of a charger, cable, or power adapter",
     "book": "a clear photo of a book or notebook",
     "clothing": "a clear photo of clothing, a hat, or a scarf",
-    "other": "a clear photo of another personal belonging",
+    "foam_roller": "a clear photo of a foam roller or massage roller",
+    "toiletries": "a clear photo of lotion, cosmetics, or toiletries",
+    "stationery": "a clear photo of stationery or a pencil case",
+    "watch": "a clear photo of a wristwatch or smartwatch",
+    "jewelry": "a clear photo of jewelry",
+    "shoes": "a clear photo of shoes or footwear",
+    "helmet": "a clear photo of a helmet",
+    "ball": "a clear photo of a sports ball",
+    "toy": "a clear photo of a toy or plush doll",
+    "personal_item": "a clear photo of another personal belonging",
 }
 IMAGE_COLOR_PROMPTS = {
     "black": "a mostly black object",
@@ -115,7 +140,17 @@ CATEGORY_ZH = {
     "charger": "充電器或線材",
     "book": "書本或筆記本",
     "clothing": "衣物",
-    "other": "個人物品",
+    "foam_roller": "按摩滾筒",
+    "toiletries": "盥洗或保養用品",
+    "stationery": "文具",
+    "watch": "手錶",
+    "jewelry": "飾品",
+    "shoes": "鞋子",
+    "helmet": "安全帽",
+    "ball": "球類",
+    "toy": "玩偶或玩具",
+    "personal_item": "其他個人物品",
+    "other": "其他個人物品",
 }
 COLOR_ZH = {
     "black": "黑色",
@@ -127,6 +162,7 @@ COLOR_ZH = {
     "pink": "粉紅色",
     "yellow": "黃色",
     "brown": "棕色",
+    "beige": "米色",
     "orange": "橘色",
     "purple": "紫色",
     "transparent": "透明",
@@ -164,9 +200,288 @@ def _contains(text: str, terms: tuple[str, ...]) -> bool:
     return any(term in lowered for term in terms)
 
 
+def normalize_category_value(value: str | None, description: str = "") -> str | None:
+    """Store stable category codes while accepting Chinese admin input and legacy `other`."""
+    raw = (value or "").strip()
+    lowered = raw.casefold()
+    if lowered in IMAGE_CATEGORY_PROMPTS:
+        if lowered not in {"other", "personal_item"}:
+            return lowered
+    combined = "；".join(part for part in (raw, description) if part)
+    inferred = next(
+        (name for name, terms in CATEGORY_TERMS.items() if _contains(combined, terms)),
+        None,
+    )
+    if inferred:
+        return inferred
+    if raw and any("\u4e00" <= char <= "\u9fff" for char in raw):
+        return raw
+    return "personal_item" if raw or description.strip() else None
+
+
+def normalize_color_value(value: str | None) -> str | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    lowered = raw.casefold()
+    if lowered in IMAGE_COLOR_PROMPTS:
+        return lowered
+    return next(
+        (name for name, terms in COLOR_TERMS.items() if _contains(raw, terms)),
+        raw if any("\u4e00" <= char <= "\u9fff" for char in raw) else None,
+    )
+
+
+def category_name_zh(category: str | None) -> str:
+    raw = (category or "").strip()
+    if not raw:
+        return "待補充物品名稱"
+    if raw in CATEGORY_ZH:
+        return CATEGORY_ZH[raw]
+    if any("\u4e00" <= char <= "\u9fff" for char in raw):
+        return raw
+    return "待補充物品名稱"
+
+
+def _feature_key(value: str) -> str:
+    return re.sub(r"[\s、，,。．·•:：;；/_-]+", "", value).casefold()
+
+
+def clean_distinctive_features(
+    features: list[str],
+    category: str | None,
+    color: str | None,
+    brand: str | None,
+    limit: int = 6,
+) -> list[str]:
+    """Keep concise, unique evidence that is not already a structured field."""
+
+    excluded = {
+        _feature_key(value)
+        for value in (
+            category or "",
+            category_name_zh(category),
+            color or "",
+            COLOR_ZH.get(color or "", ""),
+            brand or "",
+        )
+        if value
+    }
+    generic = {
+        _feature_key(value)
+        for value in ("有文字", "有標誌", "有logo", "有品牌", "物品", "看起來正常")
+    }
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for value in features:
+        feature = re.sub(r"\s+", " ", value).strip(" 、，,。．;；")
+        normalized = _feature_key(feature)
+        if not feature or normalized in excluded or normalized in generic or normalized in seen:
+            continue
+        seen.add(normalized)
+        cleaned.append(feature[:80])
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def clean_feature_evidence(
+    attributes: ItemAttributes,
+    minimum_confidence: float = 0.80,
+    limit: int = 6,
+) -> tuple[list[str], dict[str, float]]:
+    """Filter uncertain evidence and align confidence keys with cleaned features."""
+
+    confidence_by_key = {
+        _feature_key(name): max(0.0, min(1.0, float(confidence)))
+        for name, confidence in attributes.feature_confidences.items()
+        if name.strip()
+    }
+    features: list[str] = []
+    confidences: dict[str, float] = {}
+    for feature in clean_distinctive_features(
+        attributes.distinctive_features,
+        attributes.category,
+        attributes.color,
+        attributes.brand,
+        limit=30,
+    ):
+        confidence = confidence_by_key.get(_feature_key(feature), 0.0)
+        if confidence < minimum_confidence:
+            continue
+        features.append(feature)
+        confidences[feature] = round(confidence, 3)
+        if len(features) >= limit:
+            break
+    return features, confidences
+
+
+def detect_attribute_conflicts(
+    attributes: ItemAttributes, original_description: str = ""
+) -> list[str]:
+    """Detect strong category or primary-color contradictions before persistence."""
+
+    text = "；".join(
+        [attributes.normalized_description, *attributes.distinctive_features]
+    ).casefold()
+    category_hits = {
+        category
+        for category, terms in CATEGORY_TERMS.items()
+        if _contains(text, terms)
+    }
+    if "充電盒" in text:
+        category_hits.add("earphones")
+    conflicts: list[str] = []
+    supplied_text = "；".join([original_description, *attributes.visible_text]).casefold()
+    precision_pattern = re.compile(
+        r"\d+(?:\.\d+)?\s*(?:毫升|ml|公升|公斤|kg|公分|厘米|cm|毫米|mm|公尺|克|m|l)",
+        flags=re.IGNORECASE,
+    )
+    unsupported_measurements = {
+        match.group(0)
+        for match in precision_pattern.finditer(text)
+        if _feature_key(match.group(0)) not in _feature_key(supplied_text)
+    }
+    if unsupported_measurements:
+        conflicts.append(
+            "照片缺少比例尺或標示，不可猜測精確尺寸："
+            + "、".join(sorted(unsupported_measurements))
+        )
+    if attributes.category in CATEGORY_TERMS:
+        other_categories = category_hits - {attributes.category}
+        if other_categories:
+            names = "、".join(category_name_zh(value) for value in sorted(other_categories))
+            conflicts.append(
+                f"類別為{category_name_zh(attributes.category)}，描述卻同時出現{names}"
+            )
+
+    if attributes.color in COLOR_TERMS:
+        first_clause = re.split(r"[，。；]", text, maxsplit=1)[0]
+        asserted_colors = {
+            color
+            for color, terms in COLOR_TERMS.items()
+            if _contains(first_clause, terms)
+        }
+        for color, terms in COLOR_TERMS.items():
+            for term in terms:
+                if re.search(
+                    rf"(?:整體|主色|外觀|本體|傘面|瓶身|外殼)(?:主要)?(?:為|呈現|是)"
+                    rf"[^，。；]{{0,4}}{re.escape(term)}",
+                    text,
+                ):
+                    asserted_colors.add(color)
+        other_colors = asserted_colors - {attributes.color}
+        if other_colors:
+            names = "、".join(COLOR_ZH.get(value, value) for value in sorted(other_colors))
+            conflicts.append(
+                f"主色為{COLOR_ZH.get(attributes.color, attributes.color)}，描述卻宣稱主要表面為{names}"
+            )
+    return conflicts
+
+
+def item_confirmation_candidates(attributes: ItemAttributes) -> list[str]:
+    values = [*attributes.item_name_candidates]
+    category = category_name_zh(attributes.category)
+    category_is_covered = any(
+        value.strip() and (value.strip() in category or category in value.strip())
+        for value in values
+    )
+    if category not in {"待補充物品名稱", "其他個人物品"} and not category_is_covered:
+        values.insert(0, category)
+    cleaned: list[str] = []
+    for value in values:
+        name = value.strip()
+        if not name or name.casefold() in {"other", "personal_item", "其他", "其他個人物品"}:
+            continue
+        if name not in cleaned:
+            cleaned.append(name)
+    return cleaned[:3]
+
+
+def needs_item_confirmation(
+    attributes: ItemAttributes,
+    description: str,
+    has_image: bool,
+    threshold: float,
+) -> bool:
+    if not has_image:
+        return False
+    explicit_item = any(
+        _contains(description, terms) for terms in CATEGORY_TERMS.values()
+    )
+    if explicit_item:
+        return False
+    confidence = attributes.recognition_confidence
+    return (
+        attributes.category in {None, "other", "personal_item"}
+        or confidence is None
+        or confidence < threshold
+    )
+
+
 class MultimodalAnalyzer:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+
+    @staticmethod
+    def _merge_with_explicit_rules(
+        attributes: ItemAttributes, rules: ItemAttributes
+    ) -> ItemAttributes:
+        attributes.category = normalize_category_value(
+            rules.category or attributes.category,
+            attributes.normalized_description,
+        )
+        attributes.color = normalize_color_value(rules.color or attributes.color)
+        attributes.brand = attributes.brand or rules.brand
+        attributes.distinctive_features = list(
+            dict.fromkeys([*attributes.distinctive_features, *rules.distinctive_features])
+        )
+        for feature in rules.distinctive_features:
+            attributes.feature_confidences[feature] = 0.98
+        if rules.category:
+            attributes.recognition_confidence = 0.98
+            attributes.item_name_candidates = [category_name_zh(rules.category)]
+        elif not attributes.item_name_candidates and attributes.category:
+            attributes.item_name_candidates = [category_name_zh(attributes.category)]
+        attributes.item_name_candidates = item_confirmation_candidates(attributes)
+        visible_text = list(
+            dict.fromkeys(value.strip() for value in attributes.visible_text if value.strip())
+        )[:20]
+        trusted_source = rules.normalized_description.casefold()
+        trusted_visible_text: list[str] = []
+        for value in visible_text:
+            visible_key = _feature_key(value)
+            brand_key = _feature_key(attributes.brand or "")
+            is_trusted = bool(
+                visible_key
+                and (
+                    visible_key in _feature_key(trusted_source)
+                    or (brand_key and (visible_key in brand_key or brand_key in visible_key))
+                )
+            )
+            if is_trusted:
+                trusted_visible_text.append(value)
+                continue
+            for feature in attributes.distinctive_features:
+                if visible_key and visible_key in _feature_key(feature):
+                    attributes.feature_confidences[feature] = min(
+                        attributes.feature_confidences.get(feature, 0.0),
+                        0.67,
+                    )
+        attributes.visible_text = trusted_visible_text
+        features, confidences = clean_feature_evidence(attributes)
+        attributes.distinctive_features = features
+        attributes.feature_confidences = confidences
+        return attributes
+
+    @staticmethod
+    def _grounded_image_description(attributes: ItemAttributes) -> str:
+        item_name = "".join(
+            (COLOR_ZH.get(attributes.color or "", ""), category_name_zh(attributes.category))
+        )
+        name = f"{attributes.brand} {item_name}" if attributes.brand else item_name
+        details = "、".join(attributes.distinctive_features)
+        return name + (f"，可確認特徵為{details}。" if details else "。")
 
     async def analyze(
         self, description: str, image_bytes: bytes | None = None
@@ -174,18 +489,62 @@ class MultimodalAnalyzer:
         if self.settings.demo_mode:
             return await self._local_multimodal(description, image_bytes)
         try:
-            attributes = await OllamaService(self.settings).extract_item(
-                description, image_bytes
-            )
+            ollama = OllamaService(self.settings)
             rules = self._rule_based(description, bool(image_bytes))
-            attributes.category = attributes.category or rules.category
-            attributes.color = attributes.color or rules.color
-            attributes.brand = attributes.brand or rules.brand
-            attributes.distinctive_features = list(
-                dict.fromkeys(
-                    [*attributes.distinctive_features, *rules.distinctive_features]
+            if image_bytes is None and rules.category:
+                # Clear text already establishes the main category. Skip the
+                # separate classifier and use one constrained detail call.
+                classification = ItemClassification(
+                    category=rules.category,
+                    recognition_confidence=0.98,
+                    item_name_candidates=[category_name_zh(rules.category)],
                 )
-            )
+                attributes = await ollama.extract_item_details(
+                    description,
+                    classification,
+                )
+            else:
+                # Photos and unclear text still use category-first analysis.
+                attributes = await ollama.extract_item(description, image_bytes)
+            # Explicit words in the user's description are more reliable than
+            # a visual guess (for example「滾筒」must not become bottle).
+            attributes = self._merge_with_explicit_rules(attributes, rules)
+            conflicts = detect_attribute_conflicts(attributes, description)
+            if conflicts and image_bytes:
+                retried = await ollama.extract_item(
+                    description,
+                    image_bytes,
+                    correction_context=conflicts,
+                )
+                attributes = self._merge_with_explicit_rules(retried, rules)
+                remaining_conflicts = detect_attribute_conflicts(attributes, description)
+                if remaining_conflicts:
+                    attributes.recognition_confidence = min(
+                        attributes.recognition_confidence or 0.59,
+                        0.59,
+                    )
+            if image_bytes:
+                attributes.normalized_description = self._grounded_image_description(
+                    attributes
+                )
+            if needs_item_confirmation(
+                attributes,
+                description,
+                bool(image_bytes),
+                self.settings.item_confirmation_threshold,
+            ) and (attributes.brand or attributes.visible_text):
+                evidence = await TextOnlyItemLookup(self.settings).search(
+                    attributes.brand, attributes.visible_text
+                )
+                if evidence:
+                    refined = await ollama.refine_item_candidates(
+                        attributes.brand,
+                        attributes.visible_text,
+                        attributes.item_name_candidates,
+                        evidence,
+                    )
+                    if refined:
+                        attributes.item_name_candidates = refined
             return attributes
         except (httpx.HTTPError, RuntimeError, ValueError, json.JSONDecodeError):
             # Registration remains available if the local Ollama service is stopped.
@@ -220,8 +579,11 @@ class MultimodalAnalyzer:
                 ),
             }
 
-        category = attributes.category or detected["category"]
-        color = attributes.color or detected["color"]
+        category = normalize_category_value(
+            attributes.category or detected["category"],
+            attributes.normalized_description or description,
+        )
+        color = normalize_color_value(attributes.color or detected["color"])
         features = list(attributes.distinctive_features)
         shape = SHAPE_ZH.get(detected.get("shape", ""))
         feature = FEATURE_ZH.get(detected.get("feature", ""))
@@ -229,6 +591,7 @@ class MultimodalAnalyzer:
         for value in (shape, feature, material):
             if value and value not in features:
                 features.append(value)
+                attributes.feature_confidences.setdefault(value, 0.82)
 
         normalized = attributes.normalized_description.strip()
         generic_descriptions = {
@@ -238,16 +601,28 @@ class MultimodalAnalyzer:
             "使用者上傳的遺失物照片",
         }
         if normalized in generic_descriptions:
-            summary = "".join((COLOR_ZH.get(color, ""), CATEGORY_ZH.get(category, "個人物品")))
+            summary = "".join((COLOR_ZH.get(color, ""), category_name_zh(category)))
             details = "、".join(features)
             normalized = f"AI 圖像辨識：{summary}" + (f"，特色為{details}" if details else "")
-        return ItemAttributes(
+        local_result = ItemAttributes(
             category=category,
             brand=attributes.brand,
             color=color,
             distinctive_features=features,
+            feature_confidences=attributes.feature_confidences,
             normalized_description=normalized,
+            recognition_confidence=(
+                attributes.recognition_confidence
+                if attributes.recognition_confidence is not None
+                else (0.98 if attributes.category else 0.35)
+            ),
+            item_name_candidates=item_confirmation_candidates(attributes),
+            visible_text=attributes.visible_text,
         )
+        cleaned_features, confidences = clean_feature_evidence(local_result)
+        local_result.distinctive_features = cleaned_features
+        local_result.feature_confidences = confidences
+        return local_result
 
     @staticmethod
     def _basic_image_attributes(image_bytes: bytes) -> dict[str, str]:
@@ -276,7 +651,7 @@ class MultimodalAnalyzer:
         ratio = width / max(height, 1)
         shape = "long" if ratio > 1.8 or ratio < 0.55 else "rectangular"
         return {
-            "category": "other",
+            "category": "personal_item",
             "color": color,
             "shape": shape,
             "feature": "plain",
@@ -329,7 +704,10 @@ class MultimodalAnalyzer:
             brand=brand,
             color=color,
             distinctive_features=features,
+            feature_confidences={feature: 0.98 for feature in features},
             normalized_description=normalized,
+            recognition_confidence=0.98 if category else None,
+            item_name_candidates=[category_name_zh(category)] if category else [],
         )
 
 class EmbeddingService:

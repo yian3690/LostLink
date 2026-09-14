@@ -4,12 +4,22 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class ItemClassification(BaseModel):
+    category: str | None = None
+    recognition_confidence: float | None = Field(default=None, ge=0, le=1)
+    item_name_candidates: list[str] = Field(default_factory=list, max_length=5)
+
+
 class ItemAttributes(BaseModel):
     category: str | None = None
     brand: str | None = None
     color: str | None = None
     distinctive_features: list[str] = Field(default_factory=list)
+    feature_confidences: dict[str, float] = Field(default_factory=dict)
     normalized_description: str = ""
+    recognition_confidence: float | None = Field(default=None, ge=0, le=1)
+    item_name_candidates: list[str] = Field(default_factory=list, max_length=5)
+    visible_text: list[str] = Field(default_factory=list, max_length=20)
 
 
 class ReportCreate(BaseModel):
@@ -32,6 +42,10 @@ class OwnerReportUpdate(BaseModel):
     description: str = Field(min_length=1, max_length=2000)
     location: str | None = Field(default=None, max_length=240)
     occurred_at: datetime | None = None
+    image_base64: str | None = Field(
+        default=None,
+        description="Optional replacement JPEG/PNG/WebP image; null keeps the current image",
+    )
 
 
 class OwnerReportResolve(BaseModel):
@@ -60,6 +74,7 @@ class ReportRead(BaseModel):
     brand: str | None
     color: str | None
     distinctive_features: list[str]
+    feature_confidences: dict[str, float]
     campus: str | None
     location: str | None
     occurred_at: datetime | None

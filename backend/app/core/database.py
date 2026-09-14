@@ -27,8 +27,27 @@ async def init_database() -> None:
         if connection.dialect.name == "postgresql":
             await connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await connection.run_sync(Base.metadata.create_all)
+        if connection.dialect.name == "postgresql":
+            await connection.execute(
+                text(
+                    "ALTER TABLE item_reports ADD COLUMN IF NOT EXISTS "
+                    "feature_confidences JSONB NOT NULL DEFAULT '{}'::jsonb"
+                )
+            )
+        elif connection.dialect.name == "sqlite":
+            columns = await connection.execute(text("PRAGMA table_info(item_reports)"))
+            if "feature_confidences" not in {row[1] for row in columns.fetchall()}:
+                await connection.execute(
+                    text(
+                        "ALTER TABLE item_reports ADD COLUMN feature_confidences "
+                        "JSON NOT NULL DEFAULT '{}'"
+                    )
+                )
+    from app.services.locations import seed_and_load_location_aliases
+
+    async with SessionLocal() as session:
+        await seed_and_load_location_aliases(session)
 
 
 async def close_database() -> None:
     await engine.dispose()
-

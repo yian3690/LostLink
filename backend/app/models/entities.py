@@ -27,6 +27,15 @@ class User(TimestampMixin, Base):
     reports: Mapped[list["ItemReport"]] = relationship(back_populates="user")
 
 
+class CampusLocationAlias(TimestampMixin, Base):
+    __tablename__ = "campus_location_aliases"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    campus: Mapped[str | None] = mapped_column(String(120), index=True)
+    alias: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    canonical_name: Mapped[str] = mapped_column(String(240), index=True)
+
+
 class ItemReport(TimestampMixin, Base):
     __tablename__ = "item_reports"
     __table_args__ = (
@@ -42,6 +51,7 @@ class ItemReport(TimestampMixin, Base):
     brand: Mapped[str | None] = mapped_column(String(80))
     color: Mapped[str | None] = mapped_column(String(80))
     distinctive_features: Mapped[list[str]] = mapped_column(JSON, default=list)
+    feature_confidences: Mapped[dict[str, float]] = mapped_column(JSON, default=dict)
     campus: Mapped[str | None] = mapped_column(String(120), index=True)
     location: Mapped[str | None] = mapped_column(String(240))
     occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -141,4 +151,3 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )
-

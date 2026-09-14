@@ -6,12 +6,18 @@ from PIL import Image
 
 from app.main import app
 from app.api.line_webhook import (
+    _is_duplicate_event,
     _is_image_search_request,
     _is_list_request,
     _is_tracking_request,
+    _merge_tracking_clue,
+    _tracking_confirmation_message,
+    _tracking_missing_fields,
 )
 from app.services.line import LineClient
+from app.services.ai import MultimodalAnalyzer
 from app.services.ollama import OllamaService
+from app.schemas.reports import ItemAttributes
 
 
 def test_natural_found_item_questions_are_database_searches() -> None:
@@ -34,6 +40,40 @@ def test_generic_item_query_does_not_invent_a_category() -> None:
     assert not ReportService._is_generic_item_query(
         "我在三樓有東西不見，後來想找黑色保溫杯"
     )
+
+
+def test_tracking_replaces_old_location_and_accepts_unknown_time() -> None:
+    combined = _merge_tracking_clue("黑色按摩滾筒；台北市永和區", "台灣大學")
+    combined = _merge_tracking_clue(combined, "時間不確定")
+
+    assert "台北市永和區" not in combined
+    assert "台灣大學" in combined
+    assert _tracking_missing_fields(combined, has_image=False) == []
+    confirmation = _tracking_confirmation_message(combined)
+    assert confirmation[0]["quickReply"]["items"][0]["action"]["data"] == "action=confirm_tracking"
+
+
+def test_line_redelivery_event_is_processed_only_once() -> None:
+    event = {"webhookEventId": "dedupe-test-event"}
+
+    assert not _is_duplicate_event(event)
+    assert _is_duplicate_event(event)
+
+
+def test_supported_foam_roller_never_uses_other_category() -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/reports",
+            json={"kind": "found", "description": "這是一支黑色按摩滾筒，材質為泡棉"},
+        )
+
+    assert response.status_code == 201
+    assert response.json()["report"]["category"] == "foam_roller"
+
+    from app.services.ai import normalize_category_value
+
+    assert normalize_category_value("按摩滾筒") == "foam_roller"
+    assert normalize_category_value("other", "這是一支按摩滾筒") == "foam_roller"
 
 
 def test_demo_flow_creates_candidate() -> None:
@@ -201,6 +241,13 @@ def test_lost_photo_is_visible_only_to_verified_owner_or_admin(monkeypatch) -> N
         )
         assert mine.status_code == 200
         assert any(item["id"] == report["id"] for item in mine.json())
+        original_owner_image = client.get(
+            f"/api/v1/reports/{report['id']}/owner-image",
+            headers={"Authorization": "Bearer valid-owner-token"},
+        )
+        replacement_buffer = io.BytesIO()
+        Image.new("RGB", (80, 60), color=(190, 30, 25)).save(replacement_buffer, "PNG")
+        replacement_encoded = base64.b64encode(replacement_buffer.getvalue()).decode("ascii")
         updated = client.patch(
             f"/api/v1/reports/{report['id']}/mine",
             headers={"Authorization": "Bearer valid-owner-token"},
@@ -208,6 +255,7 @@ def test_lost_photo_is_visible_only_to_verified_owner_or_admin(monkeypatch) -> N
                 "description": "黑色 700ml 水壺，瓶蓋有按鈕",
                 "location": "ZB301 教室",
                 "occurred_at": "2026-09-12T10:00:00+08:00",
+                "image_base64": replacement_encoded,
             },
         )
         assert updated.status_code == 200
@@ -236,6 +284,7 @@ def test_lost_photo_is_visible_only_to_verified_owner_or_admin(monkeypatch) -> N
             headers={"Authorization": "Bearer valid-owner-token"},
         )
         assert owner_image.status_code == 200
+        assert owner_image.content != original_owner_image.content
         admin_image = client.get(
             f"/api/v1/admin/reports/{report['id']}/image",
             headers={"X-Admin-Key": "test-admin-key"},
@@ -325,9 +374,19 @@ def test_line_image_asks_intent_before_searching_or_saving(monkeypatch) -> None:
         searches.append((description, image_bytes))
         return []
 
+    async def fake_analyze(self, description, image_bytes=None):
+        return ItemAttributes(
+            category="bottle",
+            color="green",
+            normalized_description="綠色圓柱形容器",
+            recognition_confidence=0.42,
+            item_name_candidates=["水壺", "瓶裝飲料"],
+        )
+
     monkeypatch.setattr(LineClient, "download_content", fake_download)
     monkeypatch.setattr(LineClient, "reply", fake_reply)
     monkeypatch.setattr("app.services.reports.ReportService.search_found", fake_search)
+    monkeypatch.setattr(MultimodalAnalyzer, "analyze", fake_analyze)
     user_id = "photo-intent-user"
 
     def postback(action: str) -> dict:
@@ -354,6 +413,9 @@ def test_line_image_asks_intent_before_searching_or_saving(monkeypatch) -> None:
             },
         )
         after_image = client.get("/api/v1/reports").json()
+        item_confirmed = client.post(
+            "/webhooks/line", json=postback("action=confirm_item:0")
+        )
         search_response = client.post(
             "/webhooks/line", json=postback("action=photo_lost")
         )
@@ -363,18 +425,25 @@ def test_line_image_asks_intent_before_searching_or_saving(monkeypatch) -> None:
         after_search = client.get("/api/v1/reports").json()
 
     assert response.status_code == 200
+    assert item_confirmed.status_code == 200
     assert search_response.status_code == 200
     assert searched.status_code == 200
     assert len(after_image) == len(before)
     assert len(after_search) == len(before)
     assert len(searches) == 1
-    actions = replies[0][0]["quickReply"]["items"]
+    confirmation_actions = replies[0][0]["quickReply"]["items"]
+    assert {item["action"]["data"] for item in confirmation_actions} == {
+        "action=confirm_item:0",
+        "action=confirm_item:1",
+        "action=item_name_other",
+    }
+    actions = replies[1][0]["quickReply"]["items"]
     assert {item["action"]["data"] for item in actions} == {
         "action=photo_found",
         "action=photo_lost",
         "action=continue_chat",
     }
-    lost_actions = replies[1][0]["quickReply"]["items"]
+    lost_actions = replies[2][0]["quickReply"]["items"]
     assert {item["action"]["data"] for item in lost_actions} == {
         "action=search_photo",
         "action=enable_tracking",
@@ -550,6 +619,18 @@ def test_line_search_follow_up_combines_item_location_and_date(monkeypatch) -> N
     assert "綜合大樓" in description
     assert "9/10" in description
     assert location == "綜合大樓"
+
+    searches.clear()
+    user_id = "umbrella-color-follow-up-user"
+    with TestClient(app) as client:
+        client.post("/webhooks/line", json=event("我的雨傘不見了"))
+        client.post("/webhooks/line", json=event("這不是我的"))
+        client.post("/webhooks/line", json=event("我的是米色的"))
+
+    description, location = searches[-1]
+    assert "雨傘" in description
+    assert "米色" in description
+    assert "錢包" not in description
 
     searches.clear()
     user_id = "latest-location-wins-user"

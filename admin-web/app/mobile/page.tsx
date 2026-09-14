@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { itemDisplayName } from "../lib/itemLabels";
 import styles from "./mobile.module.css";
 
 type Tab = "items" | "found" | "lost" | "mine";
@@ -65,13 +66,13 @@ function toDateTimeInput(value: string | null): string {
   return new Date(date.getTime() - offset).toISOString().slice(0, 16);
 }
 
-function PrivateReportImage({ reportId, accessToken }: { reportId: string; accessToken: string }) {
+function PrivateReportImage({ reportId, accessToken, revision = 0 }: { reportId: string; accessToken: string; revision?: number }) {
   const [source, setSource] = useState("");
 
   useEffect(() => {
     let objectUrl = "";
     const controller = new AbortController();
-    void fetch(`${API}/api/v1/reports/${reportId}/owner-image`, {
+    void fetch(`${API}/api/v1/reports/${reportId}/owner-image?v=${revision}`, {
       headers: { Authorization: `Bearer ${accessToken}` },
       signal: controller.signal,
       cache: "no-store",
@@ -84,7 +85,7 @@ function PrivateReportImage({ reportId, accessToken }: { reportId: string; acces
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [accessToken, reportId]);
+  }, [accessToken, reportId, revision]);
 
   return source ? <img src={source} alt="我的遺失物照片" /> : <span>載入照片中…</span>;
 }
@@ -135,6 +136,9 @@ export default function MobilePage() {
   const [myEditDescription, setMyEditDescription] = useState("");
   const [myEditLocation, setMyEditLocation] = useState("");
   const [myEditTime, setMyEditTime] = useState("");
+  const [myEditImage, setMyEditImage] = useState("");
+  const [myEditPreview, setMyEditPreview] = useState("");
+  const [imageRevisions, setImageRevisions] = useState<Record<string, number>>({});
   const [myEditSaving, setMyEditSaving] = useState(false);
   const [myReportMatches, setMyReportMatches] = useState<Match[]>([]);
   const [showResolvePanel, setShowResolvePanel] = useState(false);
@@ -407,6 +411,8 @@ export default function MobilePage() {
     setMyEditDescription(report.description);
     setMyEditLocation(report.location ?? "");
     setMyEditTime(toDateTimeInput(report.occurred_at));
+    setMyEditImage("");
+    setMyEditPreview("");
     setMyReportMatches([]);
     setShowResolvePanel(false);
     setResolveChoice("");
@@ -441,11 +447,18 @@ export default function MobilePage() {
           description: myEditDescription.trim(),
           location: myEditLocation.trim() || null,
           occurred_at: myEditTime ? new Date(myEditTime).toISOString() : null,
+          image_base64: myEditImage || null,
         }),
       });
       if (!response.ok) throw new Error("案件更新失敗，請重新從 LINE 開啟後再試");
       const result: ReportCreated = await response.json();
       setMyReports((items) => items.map((item) => item.id === result.report.id ? result.report : item));
+      if (myEditImage) {
+        setImageRevisions((current) => ({
+          ...current,
+          [result.report.id]: (current[result.report.id] ?? 0) + 1,
+        }));
+      }
       setEditingMyReport(null);
       setNotice("協尋資料已更新，AI 特徵與候選配對也已重新計算。");
     } catch (reason) {
@@ -547,7 +560,7 @@ export default function MobilePage() {
                       </div>
                       )}
                     <div className={styles.cardBody}>
-                      <h3>{[report.color, report.category].filter(Boolean).join(" ") || "待辨識物品"}</h3>
+                      <h3>{itemDisplayName(report)}</h3>
                       <p>⌖ {report.location || "地點由保管單位確認"}</p>
                       <p>◷ {formatTime(report.occurred_at || report.created_at)}</p>
                     </div>
@@ -580,7 +593,7 @@ export default function MobilePage() {
                       <div className={styles.photo}><span>暫無照片</span><em className={styles.claimedBadge}>已認領</em></div>
                     )}
                     <div className={styles.cardBody}>
-                      <h3>{[report.color, report.category].filter(Boolean).join(" ") || "已認領物品"}</h3>
+                      <h3>{itemDisplayName(report)}</h3>
                       <p>⌖ {report.location || "地點由保管單位確認"}</p>
                       <p>◷ {formatTime(report.occurred_at || report.created_at)}</p>
                     </div>
@@ -655,7 +668,7 @@ export default function MobilePage() {
                     )}
                     <div>
                       <strong>{Math.round(match.score * 100)}% 可能相符</strong>
-                      <h3>{[report.color, report.category].filter(Boolean).join(" ") || "拾獲物品"}</h3>
+                      <h3>{itemDisplayName(report)}</h3>
                       <p>{report.location || "地點由校方確認"} · {formatTime(report.occurred_at)}</p>
                       <ul>{match.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
                       <button onClick={() => openClaim(match)}>這可能是我的</button>
@@ -682,12 +695,12 @@ export default function MobilePage() {
                     <article className={styles.card}>
                       <div className={styles.photo}>
                         {report.image_url
-                          ? <PrivateReportImage reportId={report.id} accessToken={lineAccessToken} />
+                          ? <PrivateReportImage reportId={report.id} accessToken={lineAccessToken} revision={imageRevisions[report.id]} />
                           : <span>沒有提供照片</span>}
                         <em>{report.status === "returned" ? "已結案" : report.status === "claim_pending" ? "認領確認中" : "持續協尋中"}</em>
                       </div>
                       <div className={styles.cardBody}>
-                        <h3>{[report.color, report.category].filter(Boolean).join(" ") || "遺失物品"}</h3>
+                        <h3>{itemDisplayName(report)}</h3>
                         <p>⌖ {report.location || "遺失地點未提供"}</p>
                         <p>◷ {formatTime(report.occurred_at)}</p>
                         <p title={report.description}>{report.description}</p>
@@ -710,6 +723,23 @@ export default function MobilePage() {
             <h2 id="my-edit-title">修改持續協尋資料</h2>
             <p>儲存後會更新資料庫，並依新描述重新建立 AI 特徵及候選配對。</p>
             <form onSubmit={saveMyReport}>
+              <label>物品照片
+                <span className={styles.myEditImagePicker}>
+                  {myEditPreview
+                    ? <img src={myEditPreview} alt="新的遺失物照片預覽" />
+                    : editingMyReport.image_url
+                      ? <PrivateReportImage reportId={editingMyReport.id} accessToken={lineAccessToken} revision={imageRevisions[editingMyReport.id]} />
+                      : <span>目前沒有照片</span>}
+                  <b>{editingMyReport.image_url ? "選擇新照片替換" : "新增照片"}</b>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(event) => void onImage(event, setMyEditImage, setMyEditPreview)}
+                    disabled={myEditSaving}
+                  />
+                </span>
+                <small className={styles.myEditImageHint}>選擇新照片後才會替換原圖；未選擇時會保留目前照片。</small>
+              </label>
               <label>物品描述<textarea value={myEditDescription} onChange={(event) => setMyEditDescription(event.target.value)} maxLength={2000} /></label>
               <label>遺失地點<input value={myEditLocation} onChange={(event) => setMyEditLocation(event.target.value)} placeholder="例如：ZB301 教室" maxLength={240} /></label>
               <label>遺失時間<input type="datetime-local" value={myEditTime} onChange={(event) => setMyEditTime(event.target.value)} /></label>
@@ -733,7 +763,7 @@ export default function MobilePage() {
                         return (
                           <label key={match.id}>
                             <input type="radio" name="resolve-source" value={found.id} checked={resolveChoice === found.id} onChange={(event) => setResolveChoice(event.target.value)} />
-                            <span><b>{[found.color, found.category].filter(Boolean).join(" ") || "待認領物品"}</b><small>{found.location || "地點未提供"} · 相似度 {Math.round(match.score * 100)}%</small></span>
+                            <span><b>{itemDisplayName(found)}</b><small>{found.location || "地點未提供"} · 相似度 {Math.round(match.score * 100)}%</small></span>
                           </label>
                         );
                       })}
@@ -781,7 +811,7 @@ export default function MobilePage() {
             <div className={styles.detailBody}>
               <small>FOUND ITEM DETAILS</small>
               <h2 id="item-detail-title">
-                {[selectedReport.color, selectedReport.category].filter(Boolean).join(" ") || "待辨識物品"}
+                {itemDisplayName(selectedReport)}
               </h2>
               <p className={styles.detailDescription}>
                 {selectedReport.description || "拾獲者尚未提供補充描述。"}
