@@ -6,11 +6,15 @@ from PIL import Image
 
 from app.main import app
 from app.api.line_webhook import (
+    _chat_history,
     _is_duplicate_event,
     _is_image_search_request,
     _is_list_request,
     _is_tracking_request,
     _merge_tracking_clue,
+    _save_chat_turn,
+    _store_pending_intent,
+    _take_pending_intent,
     _tracking_confirmation_message,
     _tracking_missing_fields,
 )
@@ -311,6 +315,8 @@ def test_owner_can_resolve_search_with_matched_found_item(monkeypatch) -> None:
         return "resolve-owner" if access_token == "resolve-owner-token" else None
 
     monkeypatch.setattr(LineClient, "verify_access_token", fake_verify)
+    _store_pending_intent("resolve-owner", "lost", "米色雨傘")
+    _save_chat_turn("resolve-owner", "我的雨傘不見了", "我會幫你尋找。")
     headers = {"Authorization": "Bearer resolve-owner-token"}
     with TestClient(app) as client:
         lost = client.post(
@@ -355,6 +361,104 @@ def test_owner_can_resolve_search_with_matched_found_item(monkeypatch) -> None:
         statuses = {item["id"]: item["status"] for item in reports}
         assert statuses[lost["id"]] == "returned"
         assert statuses[found["id"]] == "returned"
+
+    assert _take_pending_intent("resolve-owner") is None
+    assert _chat_history("resolve-owner") == []
+
+
+def test_possible_match_ends_previous_search_context(monkeypatch) -> None:
+    replies = []
+
+    async def fake_reply(self, reply_token: str, message) -> None:
+        replies.append(message)
+
+    monkeypatch.setattr(LineClient, "reply", fake_reply)
+    user_id = "possible-match-clears-context-user"
+    _store_pending_intent(user_id, "lost", "你有看到雨傘嗎；我的米色的")
+    _save_chat_turn(user_id, "我的雨傘不見了", "我會幫你尋找。")
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/webhooks/line",
+            json={
+                "events": [
+                    {
+                        "type": "message",
+                        "replyToken": "test-reply-token",
+                        "source": {"type": "user", "userId": user_id},
+                        "message": {"type": "text", "text": "這可能是我的"},
+                    }
+                ]
+            },
+        )
+
+    assert response.status_code == 200
+    assert replies
+    assert _take_pending_intent(user_id) is None
+    assert _chat_history(user_id) == []
+
+
+def test_new_chat_photo_does_not_inherit_previous_lost_search(monkeypatch) -> None:
+    buffer = io.BytesIO()
+    Image.new("RGB", (80, 120), color=(70, 75, 80)).save(buffer, "PNG")
+    analyzed_descriptions = []
+    replies = []
+
+    async def fake_download(self, message_id: str) -> bytes:
+        return buffer.getvalue()
+
+    async def fake_reply(self, reply_token: str, message) -> None:
+        replies.append(message)
+
+    async def fake_analyze(self, description: str, image_bytes=None):
+        analyzed_descriptions.append(description)
+        return ItemAttributes(
+            category="bottle",
+            category_confidence=0.98,
+            color="black",
+            color_confidence=0.95,
+            normalized_description="黑色水壺，杯身為圓柱形。",
+        )
+
+    monkeypatch.setattr(LineClient, "download_content", fake_download)
+    monkeypatch.setattr(LineClient, "reply", fake_reply)
+    monkeypatch.setattr(MultimodalAnalyzer, "analyze", fake_analyze)
+    monkeypatch.setattr(
+        "app.api.line_webhook.needs_item_confirmation",
+        lambda *args, **kwargs: False,
+    )
+
+    user_id = "fresh-photo-must-ignore-umbrella-user"
+    _store_pending_intent(
+        user_id,
+        "lost",
+        "我的雨傘不見了；我的是米色的；米色雨傘",
+    )
+    _save_chat_turn(user_id, "我的雨傘不見了", "我會幫你尋找。")
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/webhooks/line",
+            json={
+                "events": [
+                    {
+                        "type": "message",
+                        "replyToken": "test-reply-token",
+                        "source": {"type": "user", "userId": user_id},
+                        "message": {"type": "image", "id": "new-bottle-photo"},
+                    }
+                ]
+            },
+        )
+
+    assert response.status_code == 200
+    assert analyzed_descriptions == ["使用者上傳的遺失物照片"]
+    assert replies
+    reply_text = replies[-1][0]["text"]
+    assert "水壺" in reply_text
+    assert "雨傘" not in reply_text
+    pending = _take_pending_intent(user_id)
+    assert pending == ("photo", "黑色水壺，杯身為圓柱形。")
 
 
 def test_line_image_asks_intent_before_searching_or_saving(monkeypatch) -> None:

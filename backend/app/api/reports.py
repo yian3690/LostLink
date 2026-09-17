@@ -154,6 +154,11 @@ async def resolve_my_report(
     if not result:
         raise HTTPException(404, "Owned lost report not found")
     lost, found = result
+    # Closing the database report also ends its in-memory LINE workflow.
+    # Otherwise an unrelated photo may inherit the resolved item's clues.
+    from app.api.line_webhook import clear_user_conversation_context
+
+    clear_user_conversation_context(line_user_id)
     return OwnerReportResolved(
         lost_report=to_report_read(lost),
         found_report=to_report_read(found) if found else None,

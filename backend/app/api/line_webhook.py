@@ -145,13 +145,26 @@ def _get_active_mode(line_user_id: str | None) -> str | None:
     return value[1] if value else None
 
 
-def _clear_active_mode(line_user_id: str | None) -> None:
+def clear_user_conversation_context(
+    line_user_id: str | None,
+    *,
+    clear_chat_history: bool = True,
+) -> None:
+    """Clear transient LINE state after a workflow is finished or abandoned."""
     if not line_user_id:
         return
     _active_modes.pop(line_user_id, None)
     _pending_intents.pop(line_user_id, None)
     _pending_images.pop(line_user_id, None)
     _pending_item_confirmations.pop(line_user_id, None)
+    _recent_searches.pop(line_user_id, None)
+    if clear_chat_history:
+        _chat_histories.pop(line_user_id, None)
+
+
+def _clear_active_mode(line_user_id: str | None) -> None:
+    """Leave the active workflow while retaining unrelated general chat."""
+    clear_user_conversation_context(line_user_id, clear_chat_history=False)
 
 
 def _chat_history(line_user_id: str) -> list[dict[str, str]]:
@@ -1054,8 +1067,7 @@ async def line_webhook(
                 )
                 continue
             kind = "lost" if action.endswith("lost") else "found"
-            _active_modes.pop(line_user_id, None)
-            _pending_intents.pop(line_user_id, None)
+            _clear_active_mode(line_user_id)
             _store_active_mode(line_user_id, kind)
             prompt = (
                 "請描述遺失物名稱、顏色、地點與時間，或直接傳照片。收到照片後我會先詢問用途；只有你確認時才會搜尋或建立持續協尋。"
@@ -1179,6 +1191,9 @@ async def line_webhook(
                 await client.reply(reply_token, await _candidate_messages(request, session, latest, recent_matches))
                 continue
             if raw_text in ("這可能是我的", "可能是我的", "是我的"):
+                # Opening the claim page completes this search round. Keeping
+                # these clues would make the next photo inherit the old item.
+                clear_user_conversation_context(line_user_id)
                 await client.reply(
                     reply_token,
                     "太好了！為了避免冒領，請打開認領頁並提供只有失主知道的特徵，例如刻字、刮痕或保護殼細節。\n"
@@ -1312,11 +1327,28 @@ async def line_webhook(
                 if not line_user_id:
                     await client.reply(reply_token, "無法取得 LINE 使用者資料，請重新開啟聊天室後再試。")
                     continue
+                # A photo sent from general chat (or with no explicit mode) is
+                # a new item.  Never let an older text search such as an
+                # umbrella query bias the visual analysis of a bottle photo.
+                # Text may accompany a photo only while the user is explicitly
+                # inside a lost/tracking workflow.
+                continues_lost_workflow = mode in {
+                    "lost",
+                    "tracking",
+                    "tracking_confirm",
+                }
+                if not continues_lost_workflow:
+                    clear_user_conversation_context(line_user_id)
+                    mode = None
                 _cleanup_pending()
                 pending_value = _pending_intents.get(line_user_id)
                 pending_description = (
                     pending_value[2]
-                    if pending_value and pending_value[1] == "lost"
+                    if (
+                        continues_lost_workflow
+                        and pending_value
+                        and pending_value[1] == "lost"
+                    )
                     else ""
                 )
                 if pending_description and _is_image_search_request(pending_description):
